@@ -1,4 +1,4 @@
-name: Go
+name: Tooling-General_Linters
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 jobs:
-standard-lint:
+  standard-lint:
     runs-on: ubuntu-latest
     steps:
         
