@@ -964,6 +964,21 @@ func (s *Service) UpdateAccount(ctx context.Context, fullName string, shortName 
 	return nil
 }
 
+// UpdateEmailVerificationReminder updates the last time a user was sent a verification email.
+func (s *Service) UpdateEmailVerificationReminder(ctx context.Context, t time.Time) (err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	err = s.store.Users().Update(ctx, &User{
+		LastVerificationReminder: t,
+	})
+
+	if err != nil {
+		return Error.Wrap(err)
+	}
+
+	return nil
+}
+
 // ChangeEmail updates email for a given user.
 func (s *Service) ChangeEmail(ctx context.Context, newEmail string) (err error) {
 	defer mon.Task()(&ctx)(&err)
@@ -1645,6 +1660,36 @@ func (s *Service) GetBucketUsageRollups(ctx context.Context, projectID uuid.UUID
 	}
 
 	return result, nil
+}
+
+// GetDailyProjectUsage returns daily usage by project ID.
+func (s *Service) GetDailyProjectUsage(ctx context.Context, projectID uuid.UUID, from, to time.Time) (_ *accounting.ProjectDailyUsage, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	auth, err := s.getAuthAndAuditLog(ctx, "get daily usage by project ID")
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	_, err = s.isProjectMember(ctx, auth.User.ID, projectID)
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	bandwidthUsage, err := s.projectAccounting.GetProjectDailyBandwidthByDateRange(ctx, projectID, from, to)
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	storageUsage, err := s.projectAccounting.GetProjectDailyStorageByDateRange(ctx, projectID, from, to)
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	return &accounting.ProjectDailyUsage{
+		StorageUsage:   storageUsage,
+		BandwidthUsage: bandwidthUsage,
+	}, nil
 }
 
 // GetProjectUsageLimits returns project limits and current usage.
