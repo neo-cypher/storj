@@ -140,6 +140,11 @@
                 </template>
             </InfoContainer>
         </div>
+        <div class="project-dashboard__stats-header">
+            <p class="project-dashboard__stats-header__title">Buckets</p>
+        </div>
+        <VLoader v-if="areBucketsFetching" />
+        <BucketArea v-else />
     </div>
 </template>
 
@@ -149,6 +154,7 @@ import { Component, Vue } from 'vue-property-decorator';
 import { PROJECTS_ACTIONS } from "@/store/modules/projects";
 import { PAYMENTS_ACTIONS, PAYMENTS_MUTATIONS } from "@/store/modules/payments";
 import { APP_STATE_ACTIONS } from "@/utils/constants/actionNames";
+import { BUCKET_ACTIONS } from "@/store/modules/buckets";
 import { RouteConfig } from "@/router";
 import { DataStamp, ProjectLimits } from "@/types/projects";
 import { Dimensions, Size } from "@/utils/bytesSize";
@@ -159,6 +165,7 @@ import InfoContainer from "@/components/project/newProjectDashboard/InfoContaine
 import DashboardChart from "@/components/project/newProjectDashboard/DashboardChart.vue";
 import VButton from "@/components/common/VButton.vue";
 import DateRangeSelection from "@/components/project/newProjectDashboard/DateRangeSelection.vue";
+import BucketArea from '@/components/project/buckets/BucketArea.vue';
 
 import NewProjectIcon from "@/../static/images/project/newProject.svg";
 
@@ -171,11 +178,13 @@ import NewProjectIcon from "@/../static/images/project/newProject.svg";
         DashboardChart,
         DateRangeSelection,
         NewProjectIcon,
+        BucketArea,
     }
 })
 export default class NewProjectDashboard extends Vue {
     public now = new Date().toLocaleDateString('en-US');
     public isDataFetching = true;
+    public areBucketsFetching = true;
 
     public chartWidth = 0;
 
@@ -210,6 +219,16 @@ export default class NewProjectDashboard extends Vue {
         } catch (error) {
             await this.$notify.error(error.message);
         }
+
+        const FIRST_PAGE = 1;
+
+        try {
+            await this.$store.dispatch(BUCKET_ACTIONS.FETCH, FIRST_PAGE);
+
+            this.areBucketsFetching = false;
+        } catch (error) {
+            await this.$notify.error(error.message);
+        }
     }
 
     /**
@@ -224,8 +243,9 @@ export default class NewProjectDashboard extends Vue {
      * Used container size recalculation for charts resizing.
      */
     public recalculateChartWidth(): void {
-        const fiftyPixels = 50;
-        this.chartWidth = this.$refs.dashboard.getBoundingClientRect().width / 2 - fiftyPixels;
+        // sixty pixels.
+        const additionalPaddingRight = 60;
+        this.chartWidth = this.$refs.dashboard.getBoundingClientRect().width / 2 - additionalPaddingRight;
     }
 
     /**
@@ -364,7 +384,7 @@ export default class NewProjectDashboard extends Vue {
     .project-dashboard {
         padding: 56px 55px 56px 40px;
         height: calc(100% - 112px);
-        max-width: calc(100vw - 280px - 80px);
+        max-width: calc(100vw - 280px - 95px);
         background-image: url('../../../../static/images/project/background.png');
         background-position: top right;
         background-size: 70%;
@@ -507,7 +527,7 @@ export default class NewProjectDashboard extends Vue {
     @media screen and (max-width: 1280px) {
 
         .project-dashboard {
-            max-width: calc(100vw - 86px - 80px);
+            max-width: calc(100vw - 86px - 95px);
         }
     }
 </style>
