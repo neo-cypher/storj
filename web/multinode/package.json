@@ -39,7 +39,7 @@
     "eslint": "6.7.2",
     "eslint-plugin-storj": "github:storj/eslint-storj",
     "eslint-plugin-vue": "7.16.0",
-    "jest-fetch-mock": "3.0.0",
+    "jest-fetch-mock": "3.0.3",
     "sass": "1.37.0",
     "sass-loader": "8.0.0",
     "sinon": "7.5.0",
