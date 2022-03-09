@@ -9,7 +9,6 @@ builds:
     binary: multinode
     goos:
       - linux
-      - windows
       - darwin
     goarch:
       - 386
