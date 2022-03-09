@@ -1,0 +1,23 @@
+project_name: storj
+
+snapshot:
+  name_template: "{{ .ShortCommit }}"
+
+builds:
+  - id: multinode
+    main: ./cmd/multinode
+    binary: multinode
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - 386
+      - amd64
+      - arm64
+    goarm:
+      - 7
+
+archives:
+  - format: zip
+    name_template: "{{ .Binary }}_{{ .Os }}_{{ .Arch }}"
