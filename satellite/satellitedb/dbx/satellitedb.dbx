@@ -143,11 +143,10 @@ model node (
 	field last_contact_success timestamp ( updatable, default "epoch" )
 	field last_contact_failure timestamp ( updatable, default "epoch" )
 
-    // node is disqualified when it fails too many audits or is offline for too long
+	// node is disqualified when it fails too many audits or is offline for too long
 	field disqualified            timestamp ( updatable, nullable )
 	field disqualification_reason int       ( updatable, nullable )
-    // node is placed under inspection when it has too many unknown-error audits
-	field suspended timestamp ( updatable, nullable )
+	// node is placed under inspection when it has too many unknown-error audits
 	// renamed column from suspended
 	field unknown_audit_suspended timestamp ( updatable, nullable )
 	// node is considered unhealthy if it is offline for too many audits
@@ -207,10 +206,9 @@ model reputation (
 	field created_at           timestamp ( autoinsert, default current_timestamp )
 	field updated_at           timestamp ( autoinsert, autoupdate, default current_timestamp )
 
-    // node is disqualified when it fails too many audits or is offline for too long
+	// node is disqualified when it fails too many audits or is offline for too long
 	field disqualified timestamp ( updatable, nullable )
-    // node is placed under inspection when it has too many unknown-error audits
-	field suspended timestamp ( updatable, nullable )
+	// node is placed under inspection when it has too many unknown-error audits
 	// renamed column from suspended
 	field unknown_audit_suspended timestamp ( updatable, nullable )
 	// node is considered unhealthy if it is offline for too many audits
@@ -330,6 +328,10 @@ read one (
 )
 read one (
     select user.project_limit
+    where user.id = ?
+)
+read one (
+    select user.paid_tier
     where user.id = ?
 )
 
@@ -1105,14 +1107,16 @@ read limitoffset (
 model coinpayments_transaction (
     key id
 
-    field id        text
-    field user_id   blob
-    field address   text
-    field amount    blob
-    field received  blob ( updatable )
-    field status    int  ( updatable )
-    field key       text
-    field timeout   int
+    field id               text
+    field user_id          blob
+    field address          text
+    field amount_gob       blob  ( nullable, updatable )
+    field amount_numeric   int64 ( nullable, updatable )
+    field received_gob     blob  ( nullable, updatable )
+    field received_numeric int64 ( nullable, updatable )
+    field status           int   ( updatable )
+    field key              text
+    field timeout          int
 
     field created_at timestamp ( autoinsert )
 )
@@ -1174,7 +1178,8 @@ model stripecoinpayments_tx_conversion_rate (
     key tx_id
 
     field tx_id        text
-    field rate         blob
+    field rate_gob     blob    ( nullable )
+    field rate_numeric float64 ( nullable )
 
     field created_at timestamp ( autoinsert )
 )
@@ -1364,6 +1369,7 @@ create oauth_code ()
 read one (
     select oauth_code
     where oauth_code.code = ?
+    where oauth_code.claimed_at = null
 )
 
 update oauth_code (

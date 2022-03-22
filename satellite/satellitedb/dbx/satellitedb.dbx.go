@@ -376,8 +376,10 @@ CREATE TABLE coinpayments_transactions (
 	id text NOT NULL,
 	user_id bytea NOT NULL,
 	address text NOT NULL,
-	amount bytea NOT NULL,
-	received bytea NOT NULL,
+	amount_gob bytea,
+	amount_numeric bigint,
+	received_gob bytea,
+	received_numeric bigint,
 	status integer NOT NULL,
 	key text NOT NULL,
 	timeout integer NOT NULL,
@@ -466,7 +468,6 @@ CREATE TABLE nodes (
 	last_contact_failure timestamp with time zone NOT NULL DEFAULT 'epoch',
 	disqualified timestamp with time zone,
 	disqualification_reason integer,
-	suspended timestamp with time zone,
 	unknown_audit_suspended timestamp with time zone,
 	offline_suspended timestamp with time zone,
 	under_review timestamp with time zone,
@@ -592,7 +593,6 @@ CREATE TABLE reputations (
 	created_at timestamp with time zone NOT NULL DEFAULT current_timestamp,
 	updated_at timestamp with time zone NOT NULL DEFAULT current_timestamp,
 	disqualified timestamp with time zone,
-	suspended timestamp with time zone,
 	unknown_audit_suspended timestamp with time zone,
 	offline_suspended timestamp with time zone,
 	under_review timestamp with time zone,
@@ -718,7 +718,8 @@ CREATE TABLE stripecoinpayments_invoice_project_records (
 );
 CREATE TABLE stripecoinpayments_tx_conversion_rates (
 	tx_id text NOT NULL,
-	rate bytea NOT NULL,
+	rate_gob bytea,
+	rate_numeric double precision,
 	created_at timestamp with time zone NOT NULL,
 	PRIMARY KEY ( tx_id )
 );
@@ -998,8 +999,10 @@ CREATE TABLE coinpayments_transactions (
 	id text NOT NULL,
 	user_id bytea NOT NULL,
 	address text NOT NULL,
-	amount bytea NOT NULL,
-	received bytea NOT NULL,
+	amount_gob bytea,
+	amount_numeric bigint,
+	received_gob bytea,
+	received_numeric bigint,
 	status integer NOT NULL,
 	key text NOT NULL,
 	timeout integer NOT NULL,
@@ -1088,7 +1091,6 @@ CREATE TABLE nodes (
 	last_contact_failure timestamp with time zone NOT NULL DEFAULT 'epoch',
 	disqualified timestamp with time zone,
 	disqualification_reason integer,
-	suspended timestamp with time zone,
 	unknown_audit_suspended timestamp with time zone,
 	offline_suspended timestamp with time zone,
 	under_review timestamp with time zone,
@@ -1214,7 +1216,6 @@ CREATE TABLE reputations (
 	created_at timestamp with time zone NOT NULL DEFAULT current_timestamp,
 	updated_at timestamp with time zone NOT NULL DEFAULT current_timestamp,
 	disqualified timestamp with time zone,
-	suspended timestamp with time zone,
 	unknown_audit_suspended timestamp with time zone,
 	offline_suspended timestamp with time zone,
 	under_review timestamp with time zone,
@@ -1340,7 +1341,8 @@ CREATE TABLE stripecoinpayments_invoice_project_records (
 );
 CREATE TABLE stripecoinpayments_tx_conversion_rates (
 	tx_id text NOT NULL,
-	rate bytea NOT NULL,
+	rate_gob bytea,
+	rate_numeric double precision,
 	created_at timestamp with time zone NOT NULL,
 	PRIMARY KEY ( tx_id )
 );
@@ -2321,22 +2323,34 @@ func (f BucketStorageTally_MetadataSize_Field) value() interface{} {
 func (BucketStorageTally_MetadataSize_Field) _Column() string { return "metadata_size" }
 
 type CoinpaymentsTransaction struct {
-	Id        string
-	UserId    []byte
-	Address   string
-	Amount    []byte
-	Received  []byte
-	Status    int
-	Key       string
-	Timeout   int
-	CreatedAt time.Time
+	Id              string
+	UserId          []byte
+	Address         string
+	AmountGob       []byte
+	AmountNumeric   *int64
+	ReceivedGob     []byte
+	ReceivedNumeric *int64
+	Status          int
+	Key             string
+	Timeout         int
+	CreatedAt       time.Time
 }
 
 func (CoinpaymentsTransaction) _Table() string { return "coinpayments_transactions" }
 
+type CoinpaymentsTransaction_Create_Fields struct {
+	AmountGob       CoinpaymentsTransaction_AmountGob_Field
+	AmountNumeric   CoinpaymentsTransaction_AmountNumeric_Field
+	ReceivedGob     CoinpaymentsTransaction_ReceivedGob_Field
+	ReceivedNumeric CoinpaymentsTransaction_ReceivedNumeric_Field
+}
+
 type CoinpaymentsTransaction_Update_Fields struct {
-	Received CoinpaymentsTransaction_Received_Field
-	Status   CoinpaymentsTransaction_Status_Field
+	AmountGob       CoinpaymentsTransaction_AmountGob_Field
+	AmountNumeric   CoinpaymentsTransaction_AmountNumeric_Field
+	ReceivedGob     CoinpaymentsTransaction_ReceivedGob_Field
+	ReceivedNumeric CoinpaymentsTransaction_ReceivedNumeric_Field
+	Status          CoinpaymentsTransaction_Status_Field
 }
 
 type CoinpaymentsTransaction_Id_Field struct {
@@ -2396,43 +2410,141 @@ func (f CoinpaymentsTransaction_Address_Field) value() interface{} {
 
 func (CoinpaymentsTransaction_Address_Field) _Column() string { return "address" }
 
-type CoinpaymentsTransaction_Amount_Field struct {
+type CoinpaymentsTransaction_AmountGob_Field struct {
 	_set   bool
 	_null  bool
 	_value []byte
 }
 
-func CoinpaymentsTransaction_Amount(v []byte) CoinpaymentsTransaction_Amount_Field {
-	return CoinpaymentsTransaction_Amount_Field{_set: true, _value: v}
+func CoinpaymentsTransaction_AmountGob(v []byte) CoinpaymentsTransaction_AmountGob_Field {
+	return CoinpaymentsTransaction_AmountGob_Field{_set: true, _value: v}
 }
 
-func (f CoinpaymentsTransaction_Amount_Field) value() interface{} {
+func CoinpaymentsTransaction_AmountGob_Raw(v []byte) CoinpaymentsTransaction_AmountGob_Field {
+	if v == nil {
+		return CoinpaymentsTransaction_AmountGob_Null()
+	}
+	return CoinpaymentsTransaction_AmountGob(v)
+}
+
+func CoinpaymentsTransaction_AmountGob_Null() CoinpaymentsTransaction_AmountGob_Field {
+	return CoinpaymentsTransaction_AmountGob_Field{_set: true, _null: true}
+}
+
+func (f CoinpaymentsTransaction_AmountGob_Field) isnull() bool {
+	return !f._set || f._null || f._value == nil
+}
+
+func (f CoinpaymentsTransaction_AmountGob_Field) value() interface{} {
 	if !f._set || f._null {
 		return nil
 	}
 	return f._value
 }
 
-func (CoinpaymentsTransaction_Amount_Field) _Column() string { return "amount" }
+func (CoinpaymentsTransaction_AmountGob_Field) _Column() string { return "amount_gob" }
 
-type CoinpaymentsTransaction_Received_Field struct {
+type CoinpaymentsTransaction_AmountNumeric_Field struct {
 	_set   bool
 	_null  bool
-	_value []byte
+	_value *int64
 }
 
-func CoinpaymentsTransaction_Received(v []byte) CoinpaymentsTransaction_Received_Field {
-	return CoinpaymentsTransaction_Received_Field{_set: true, _value: v}
+func CoinpaymentsTransaction_AmountNumeric(v int64) CoinpaymentsTransaction_AmountNumeric_Field {
+	return CoinpaymentsTransaction_AmountNumeric_Field{_set: true, _value: &v}
 }
 
-func (f CoinpaymentsTransaction_Received_Field) value() interface{} {
+func CoinpaymentsTransaction_AmountNumeric_Raw(v *int64) CoinpaymentsTransaction_AmountNumeric_Field {
+	if v == nil {
+		return CoinpaymentsTransaction_AmountNumeric_Null()
+	}
+	return CoinpaymentsTransaction_AmountNumeric(*v)
+}
+
+func CoinpaymentsTransaction_AmountNumeric_Null() CoinpaymentsTransaction_AmountNumeric_Field {
+	return CoinpaymentsTransaction_AmountNumeric_Field{_set: true, _null: true}
+}
+
+func (f CoinpaymentsTransaction_AmountNumeric_Field) isnull() bool {
+	return !f._set || f._null || f._value == nil
+}
+
+func (f CoinpaymentsTransaction_AmountNumeric_Field) value() interface{} {
 	if !f._set || f._null {
 		return nil
 	}
 	return f._value
 }
 
-func (CoinpaymentsTransaction_Received_Field) _Column() string { return "received" }
+func (CoinpaymentsTransaction_AmountNumeric_Field) _Column() string { return "amount_numeric" }
+
+type CoinpaymentsTransaction_ReceivedGob_Field struct {
+	_set   bool
+	_null  bool
+	_value []byte
+}
+
+func CoinpaymentsTransaction_ReceivedGob(v []byte) CoinpaymentsTransaction_ReceivedGob_Field {
+	return CoinpaymentsTransaction_ReceivedGob_Field{_set: true, _value: v}
+}
+
+func CoinpaymentsTransaction_ReceivedGob_Raw(v []byte) CoinpaymentsTransaction_ReceivedGob_Field {
+	if v == nil {
+		return CoinpaymentsTransaction_ReceivedGob_Null()
+	}
+	return CoinpaymentsTransaction_ReceivedGob(v)
+}
+
+func CoinpaymentsTransaction_ReceivedGob_Null() CoinpaymentsTransaction_ReceivedGob_Field {
+	return CoinpaymentsTransaction_ReceivedGob_Field{_set: true, _null: true}
+}
+
+func (f CoinpaymentsTransaction_ReceivedGob_Field) isnull() bool {
+	return !f._set || f._null || f._value == nil
+}
+
+func (f CoinpaymentsTransaction_ReceivedGob_Field) value() interface{} {
+	if !f._set || f._null {
+		return nil
+	}
+	return f._value
+}
+
+func (CoinpaymentsTransaction_ReceivedGob_Field) _Column() string { return "received_gob" }
+
+type CoinpaymentsTransaction_ReceivedNumeric_Field struct {
+	_set   bool
+	_null  bool
+	_value *int64
+}
+
+func CoinpaymentsTransaction_ReceivedNumeric(v int64) CoinpaymentsTransaction_ReceivedNumeric_Field {
+	return CoinpaymentsTransaction_ReceivedNumeric_Field{_set: true, _value: &v}
+}
+
+func CoinpaymentsTransaction_ReceivedNumeric_Raw(v *int64) CoinpaymentsTransaction_ReceivedNumeric_Field {
+	if v == nil {
+		return CoinpaymentsTransaction_ReceivedNumeric_Null()
+	}
+	return CoinpaymentsTransaction_ReceivedNumeric(*v)
+}
+
+func CoinpaymentsTransaction_ReceivedNumeric_Null() CoinpaymentsTransaction_ReceivedNumeric_Field {
+	return CoinpaymentsTransaction_ReceivedNumeric_Field{_set: true, _null: true}
+}
+
+func (f CoinpaymentsTransaction_ReceivedNumeric_Field) isnull() bool {
+	return !f._set || f._null || f._value == nil
+}
+
+func (f CoinpaymentsTransaction_ReceivedNumeric_Field) value() interface{} {
+	if !f._set || f._null {
+		return nil
+	}
+	return f._value
+}
+
+func (CoinpaymentsTransaction_ReceivedNumeric_Field) _Column() string { return "received_numeric" }
 
 type CoinpaymentsTransaction_Status_Field struct {
 	_set   bool
@@ -3519,7 +3631,6 @@ type Node struct {
 	LastContactFailure     time.Time
 	Disqualified           *time.Time
 	DisqualificationReason *int
-	Suspended              *time.Time
 	UnknownAuditSuspended  *time.Time
 	OfflineSuspended       *time.Time
 	UnderReview            *time.Time
@@ -3551,7 +3662,6 @@ type Node_Create_Fields struct {
 	LastContactFailure     Node_LastContactFailure_Field
 	Disqualified           Node_Disqualified_Field
 	DisqualificationReason Node_DisqualificationReason_Field
-	Suspended              Node_Suspended_Field
 	UnknownAuditSuspended  Node_UnknownAuditSuspended_Field
 	OfflineSuspended       Node_OfflineSuspended_Field
 	UnderReview            Node_UnderReview_Field
@@ -3585,7 +3695,6 @@ type Node_Update_Fields struct {
 	LastContactFailure     Node_LastContactFailure_Field
 	Disqualified           Node_Disqualified_Field
 	DisqualificationReason Node_DisqualificationReason_Field
-	Suspended              Node_Suspended_Field
 	UnknownAuditSuspended  Node_UnknownAuditSuspended_Field
 	OfflineSuspended       Node_OfflineSuspended_Field
 	UnderReview            Node_UnderReview_Field
@@ -4155,38 +4264,6 @@ func (f Node_DisqualificationReason_Field) value() interface{} {
 }
 
 func (Node_DisqualificationReason_Field) _Column() string { return "disqualification_reason" }
-
-type Node_Suspended_Field struct {
-	_set   bool
-	_null  bool
-	_value *time.Time
-}
-
-func Node_Suspended(v time.Time) Node_Suspended_Field {
-	return Node_Suspended_Field{_set: true, _value: &v}
-}
-
-func Node_Suspended_Raw(v *time.Time) Node_Suspended_Field {
-	if v == nil {
-		return Node_Suspended_Null()
-	}
-	return Node_Suspended(*v)
-}
-
-func Node_Suspended_Null() Node_Suspended_Field {
-	return Node_Suspended_Field{_set: true, _null: true}
-}
-
-func (f Node_Suspended_Field) isnull() bool { return !f._set || f._null || f._value == nil }
-
-func (f Node_Suspended_Field) value() interface{} {
-	if !f._set || f._null {
-		return nil
-	}
-	return f._value
-}
-
-func (Node_Suspended_Field) _Column() string { return "suspended" }
 
 type Node_UnknownAuditSuspended_Field struct {
 	_set   bool
@@ -6234,7 +6311,6 @@ type Reputation struct {
 	CreatedAt                   time.Time
 	UpdatedAt                   time.Time
 	Disqualified                *time.Time
-	Suspended                   *time.Time
 	UnknownAuditSuspended       *time.Time
 	OfflineSuspended            *time.Time
 	UnderReview                 *time.Time
@@ -6253,7 +6329,6 @@ type Reputation_Create_Fields struct {
 	TotalAuditCount             Reputation_TotalAuditCount_Field
 	VettedAt                    Reputation_VettedAt_Field
 	Disqualified                Reputation_Disqualified_Field
-	Suspended                   Reputation_Suspended_Field
 	UnknownAuditSuspended       Reputation_UnknownAuditSuspended_Field
 	OfflineSuspended            Reputation_OfflineSuspended_Field
 	UnderReview                 Reputation_UnderReview_Field
@@ -6269,7 +6344,6 @@ type Reputation_Update_Fields struct {
 	TotalAuditCount             Reputation_TotalAuditCount_Field
 	VettedAt                    Reputation_VettedAt_Field
 	Disqualified                Reputation_Disqualified_Field
-	Suspended                   Reputation_Suspended_Field
 	UnknownAuditSuspended       Reputation_UnknownAuditSuspended_Field
 	OfflineSuspended            Reputation_OfflineSuspended_Field
 	UnderReview                 Reputation_UnderReview_Field
@@ -6439,38 +6513,6 @@ func (f Reputation_Disqualified_Field) value() interface{} {
 }
 
 func (Reputation_Disqualified_Field) _Column() string { return "disqualified" }
-
-type Reputation_Suspended_Field struct {
-	_set   bool
-	_null  bool
-	_value *time.Time
-}
-
-func Reputation_Suspended(v time.Time) Reputation_Suspended_Field {
-	return Reputation_Suspended_Field{_set: true, _value: &v}
-}
-
-func Reputation_Suspended_Raw(v *time.Time) Reputation_Suspended_Field {
-	if v == nil {
-		return Reputation_Suspended_Null()
-	}
-	return Reputation_Suspended(*v)
-}
-
-func Reputation_Suspended_Null() Reputation_Suspended_Field {
-	return Reputation_Suspended_Field{_set: true, _null: true}
-}
-
-func (f Reputation_Suspended_Field) isnull() bool { return !f._set || f._null || f._value == nil }
-
-func (f Reputation_Suspended_Field) value() interface{} {
-	if !f._set || f._null {
-		return nil
-	}
-	return f._value
-}
-
-func (Reputation_Suspended_Field) _Column() string { return "suspended" }
 
 type Reputation_UnknownAuditSuspended_Field struct {
 	_set   bool
@@ -8447,13 +8489,19 @@ func (f StripecoinpaymentsInvoiceProjectRecord_CreatedAt_Field) value() interfac
 func (StripecoinpaymentsInvoiceProjectRecord_CreatedAt_Field) _Column() string { return "created_at" }
 
 type StripecoinpaymentsTxConversionRate struct {
-	TxId      string
-	Rate      []byte
-	CreatedAt time.Time
+	TxId        string
+	RateGob     []byte
+	RateNumeric *float64
+	CreatedAt   time.Time
 }
 
 func (StripecoinpaymentsTxConversionRate) _Table() string {
 	return "stripecoinpayments_tx_conversion_rates"
+}
+
+type StripecoinpaymentsTxConversionRate_Create_Fields struct {
+	RateGob     StripecoinpaymentsTxConversionRate_RateGob_Field
+	RateNumeric StripecoinpaymentsTxConversionRate_RateNumeric_Field
 }
 
 type StripecoinpaymentsTxConversionRate_Update_Fields struct {
@@ -8478,24 +8526,73 @@ func (f StripecoinpaymentsTxConversionRate_TxId_Field) value() interface{} {
 
 func (StripecoinpaymentsTxConversionRate_TxId_Field) _Column() string { return "tx_id" }
 
-type StripecoinpaymentsTxConversionRate_Rate_Field struct {
+type StripecoinpaymentsTxConversionRate_RateGob_Field struct {
 	_set   bool
 	_null  bool
 	_value []byte
 }
 
-func StripecoinpaymentsTxConversionRate_Rate(v []byte) StripecoinpaymentsTxConversionRate_Rate_Field {
-	return StripecoinpaymentsTxConversionRate_Rate_Field{_set: true, _value: v}
+func StripecoinpaymentsTxConversionRate_RateGob(v []byte) StripecoinpaymentsTxConversionRate_RateGob_Field {
+	return StripecoinpaymentsTxConversionRate_RateGob_Field{_set: true, _value: v}
 }
 
-func (f StripecoinpaymentsTxConversionRate_Rate_Field) value() interface{} {
+func StripecoinpaymentsTxConversionRate_RateGob_Raw(v []byte) StripecoinpaymentsTxConversionRate_RateGob_Field {
+	if v == nil {
+		return StripecoinpaymentsTxConversionRate_RateGob_Null()
+	}
+	return StripecoinpaymentsTxConversionRate_RateGob(v)
+}
+
+func StripecoinpaymentsTxConversionRate_RateGob_Null() StripecoinpaymentsTxConversionRate_RateGob_Field {
+	return StripecoinpaymentsTxConversionRate_RateGob_Field{_set: true, _null: true}
+}
+
+func (f StripecoinpaymentsTxConversionRate_RateGob_Field) isnull() bool {
+	return !f._set || f._null || f._value == nil
+}
+
+func (f StripecoinpaymentsTxConversionRate_RateGob_Field) value() interface{} {
 	if !f._set || f._null {
 		return nil
 	}
 	return f._value
 }
 
-func (StripecoinpaymentsTxConversionRate_Rate_Field) _Column() string { return "rate" }
+func (StripecoinpaymentsTxConversionRate_RateGob_Field) _Column() string { return "rate_gob" }
+
+type StripecoinpaymentsTxConversionRate_RateNumeric_Field struct {
+	_set   bool
+	_null  bool
+	_value *float64
+}
+
+func StripecoinpaymentsTxConversionRate_RateNumeric(v float64) StripecoinpaymentsTxConversionRate_RateNumeric_Field {
+	return StripecoinpaymentsTxConversionRate_RateNumeric_Field{_set: true, _value: &v}
+}
+
+func StripecoinpaymentsTxConversionRate_RateNumeric_Raw(v *float64) StripecoinpaymentsTxConversionRate_RateNumeric_Field {
+	if v == nil {
+		return StripecoinpaymentsTxConversionRate_RateNumeric_Null()
+	}
+	return StripecoinpaymentsTxConversionRate_RateNumeric(*v)
+}
+
+func StripecoinpaymentsTxConversionRate_RateNumeric_Null() StripecoinpaymentsTxConversionRate_RateNumeric_Field {
+	return StripecoinpaymentsTxConversionRate_RateNumeric_Field{_set: true, _null: true}
+}
+
+func (f StripecoinpaymentsTxConversionRate_RateNumeric_Field) isnull() bool {
+	return !f._set || f._null || f._value == nil
+}
+
+func (f StripecoinpaymentsTxConversionRate_RateNumeric_Field) value() interface{} {
+	if !f._set || f._null {
+		return nil
+	}
+	return f._value
+}
+
+func (StripecoinpaymentsTxConversionRate_RateNumeric_Field) _Column() string { return "rate_numeric" }
 
 type StripecoinpaymentsTxConversionRate_CreatedAt_Field struct {
 	_set   bool
@@ -10864,6 +10961,10 @@ type Paged_StoragenodeBandwidthRollup_By_StoragenodeId_And_IntervalStart_Greater
 	_set                  bool
 }
 
+type PaidTier_Row struct {
+	PaidTier bool
+}
+
 type Placement_Row struct {
 	Placement *int
 }
@@ -10955,20 +11056,19 @@ func (obj *pgxImpl) Create_Reputation(ctx context.Context,
 	__id_val := reputation_id.value()
 	__vetted_at_val := optional.VettedAt.value()
 	__disqualified_val := optional.Disqualified.value()
-	__suspended_val := optional.Suspended.value()
 	__unknown_audit_suspended_val := optional.UnknownAuditSuspended.value()
 	__offline_suspended_val := optional.OfflineSuspended.value()
 	__under_review_val := optional.UnderReview.value()
 	__audit_history_val := reputation_audit_history.value()
 
-	var __columns = &__sqlbundle_Hole{SQL: __sqlbundle_Literal("id, vetted_at, disqualified, suspended, unknown_audit_suspended, offline_suspended, under_review, audit_history")}
-	var __placeholders = &__sqlbundle_Hole{SQL: __sqlbundle_Literal("?, ?, ?, ?, ?, ?, ?, ?")}
+	var __columns = &__sqlbundle_Hole{SQL: __sqlbundle_Literal("id, vetted_at, disqualified, unknown_audit_suspended, offline_suspended, under_review, audit_history")}
+	var __placeholders = &__sqlbundle_Hole{SQL: __sqlbundle_Literal("?, ?, ?, ?, ?, ?, ?")}
 	var __clause = &__sqlbundle_Hole{SQL: __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("("), __columns, __sqlbundle_Literal(") VALUES ("), __placeholders, __sqlbundle_Literal(")")}}}
 
-	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("INSERT INTO reputations "), __clause, __sqlbundle_Literal(" RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.suspended, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
+	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("INSERT INTO reputations "), __clause, __sqlbundle_Literal(" RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
 
 	var __values []interface{}
-	__values = append(__values, __id_val, __vetted_at_val, __disqualified_val, __suspended_val, __unknown_audit_suspended_val, __offline_suspended_val, __under_review_val, __audit_history_val)
+	__values = append(__values, __id_val, __vetted_at_val, __disqualified_val, __unknown_audit_suspended_val, __offline_suspended_val, __under_review_val, __audit_history_val)
 
 	__optional_columns := __sqlbundle_Literals{Join: ", "}
 	__optional_placeholders := __sqlbundle_Literals{Join: ", "}
@@ -11027,7 +11127,7 @@ func (obj *pgxImpl) Create_Reputation(ctx context.Context,
 	obj.logStmt(__stmt, __values...)
 
 	reputation = &Reputation{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.Suspended, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
 	if err != nil {
 		return nil, obj.makeErr(err)
 	}
@@ -11619,11 +11719,10 @@ func (obj *pgxImpl) Create_CoinpaymentsTransaction(ctx context.Context,
 	coinpayments_transaction_id CoinpaymentsTransaction_Id_Field,
 	coinpayments_transaction_user_id CoinpaymentsTransaction_UserId_Field,
 	coinpayments_transaction_address CoinpaymentsTransaction_Address_Field,
-	coinpayments_transaction_amount CoinpaymentsTransaction_Amount_Field,
-	coinpayments_transaction_received CoinpaymentsTransaction_Received_Field,
 	coinpayments_transaction_status CoinpaymentsTransaction_Status_Field,
 	coinpayments_transaction_key CoinpaymentsTransaction_Key_Field,
-	coinpayments_transaction_timeout CoinpaymentsTransaction_Timeout_Field) (
+	coinpayments_transaction_timeout CoinpaymentsTransaction_Timeout_Field,
+	optional CoinpaymentsTransaction_Create_Fields) (
 	coinpayments_transaction *CoinpaymentsTransaction, err error) {
 	defer mon.Task()(&ctx)(&err)
 
@@ -11631,23 +11730,25 @@ func (obj *pgxImpl) Create_CoinpaymentsTransaction(ctx context.Context,
 	__id_val := coinpayments_transaction_id.value()
 	__user_id_val := coinpayments_transaction_user_id.value()
 	__address_val := coinpayments_transaction_address.value()
-	__amount_val := coinpayments_transaction_amount.value()
-	__received_val := coinpayments_transaction_received.value()
+	__amount_gob_val := optional.AmountGob.value()
+	__amount_numeric_val := optional.AmountNumeric.value()
+	__received_gob_val := optional.ReceivedGob.value()
+	__received_numeric_val := optional.ReceivedNumeric.value()
 	__status_val := coinpayments_transaction_status.value()
 	__key_val := coinpayments_transaction_key.value()
 	__timeout_val := coinpayments_transaction_timeout.value()
 	__created_at_val := __now
 
-	var __embed_stmt = __sqlbundle_Literal("INSERT INTO coinpayments_transactions ( id, user_id, address, amount, received, status, key, timeout, created_at ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ? ) RETURNING coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount, coinpayments_transactions.received, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at")
+	var __embed_stmt = __sqlbundle_Literal("INSERT INTO coinpayments_transactions ( id, user_id, address, amount_gob, amount_numeric, received_gob, received_numeric, status, key, timeout, created_at ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? ) RETURNING coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount_gob, coinpayments_transactions.amount_numeric, coinpayments_transactions.received_gob, coinpayments_transactions.received_numeric, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at")
 
 	var __values []interface{}
-	__values = append(__values, __id_val, __user_id_val, __address_val, __amount_val, __received_val, __status_val, __key_val, __timeout_val, __created_at_val)
+	__values = append(__values, __id_val, __user_id_val, __address_val, __amount_gob_val, __amount_numeric_val, __received_gob_val, __received_numeric_val, __status_val, __key_val, __timeout_val, __created_at_val)
 
 	var __stmt = __sqlbundle_Render(obj.dialect, __embed_stmt)
 	obj.logStmt(__stmt, __values...)
 
 	coinpayments_transaction = &CoinpaymentsTransaction{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.Amount, &coinpayments_transaction.Received, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.AmountGob, &coinpayments_transaction.AmountNumeric, &coinpayments_transaction.ReceivedGob, &coinpayments_transaction.ReceivedNumeric, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
 	if err != nil {
 		return nil, obj.makeErr(err)
 	}
@@ -11698,25 +11799,26 @@ func (obj *pgxImpl) Create_StripecoinpaymentsInvoiceProjectRecord(ctx context.Co
 
 func (obj *pgxImpl) Create_StripecoinpaymentsTxConversionRate(ctx context.Context,
 	stripecoinpayments_tx_conversion_rate_tx_id StripecoinpaymentsTxConversionRate_TxId_Field,
-	stripecoinpayments_tx_conversion_rate_rate StripecoinpaymentsTxConversionRate_Rate_Field) (
+	optional StripecoinpaymentsTxConversionRate_Create_Fields) (
 	stripecoinpayments_tx_conversion_rate *StripecoinpaymentsTxConversionRate, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	__now := obj.db.Hooks.Now().UTC()
 	__tx_id_val := stripecoinpayments_tx_conversion_rate_tx_id.value()
-	__rate_val := stripecoinpayments_tx_conversion_rate_rate.value()
+	__rate_gob_val := optional.RateGob.value()
+	__rate_numeric_val := optional.RateNumeric.value()
 	__created_at_val := __now
 
-	var __embed_stmt = __sqlbundle_Literal("INSERT INTO stripecoinpayments_tx_conversion_rates ( tx_id, rate, created_at ) VALUES ( ?, ?, ? ) RETURNING stripecoinpayments_tx_conversion_rates.tx_id, stripecoinpayments_tx_conversion_rates.rate, stripecoinpayments_tx_conversion_rates.created_at")
+	var __embed_stmt = __sqlbundle_Literal("INSERT INTO stripecoinpayments_tx_conversion_rates ( tx_id, rate_gob, rate_numeric, created_at ) VALUES ( ?, ?, ?, ? ) RETURNING stripecoinpayments_tx_conversion_rates.tx_id, stripecoinpayments_tx_conversion_rates.rate_gob, stripecoinpayments_tx_conversion_rates.rate_numeric, stripecoinpayments_tx_conversion_rates.created_at")
 
 	var __values []interface{}
-	__values = append(__values, __tx_id_val, __rate_val, __created_at_val)
+	__values = append(__values, __tx_id_val, __rate_gob_val, __rate_numeric_val, __created_at_val)
 
 	var __stmt = __sqlbundle_Render(obj.dialect, __embed_stmt)
 	obj.logStmt(__stmt, __values...)
 
 	stripecoinpayments_tx_conversion_rate = &StripecoinpaymentsTxConversionRate{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&stripecoinpayments_tx_conversion_rate.TxId, &stripecoinpayments_tx_conversion_rate.Rate, &stripecoinpayments_tx_conversion_rate.CreatedAt)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&stripecoinpayments_tx_conversion_rate.TxId, &stripecoinpayments_tx_conversion_rate.RateGob, &stripecoinpayments_tx_conversion_rate.RateNumeric, &stripecoinpayments_tx_conversion_rate.CreatedAt)
 	if err != nil {
 		return nil, obj.makeErr(err)
 	}
@@ -12042,7 +12144,7 @@ func (obj *pgxImpl) Get_Node_By_Id(ctx context.Context,
 	node *Node, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.suspended, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success FROM nodes WHERE nodes.id = ?")
+	var __embed_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success FROM nodes WHERE nodes.id = ?")
 
 	var __values []interface{}
 	__values = append(__values, node_id.value())
@@ -12051,7 +12153,7 @@ func (obj *pgxImpl) Get_Node_By_Id(ctx context.Context,
 	obj.logStmt(__stmt, __values...)
 
 	node = &Node{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.Suspended, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess)
 	if err != nil {
 		return (*Node)(nil), obj.makeErr(err)
 	}
@@ -12107,9 +12209,9 @@ func (obj *pgxImpl) Paged_Node(ctx context.Context,
 	rows []*Node, next *Paged_Node_Continuation, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.suspended, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success, nodes.id FROM nodes WHERE (nodes.id) > ? ORDER BY nodes.id LIMIT ?")
+	var __embed_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success, nodes.id FROM nodes WHERE (nodes.id) > ? ORDER BY nodes.id LIMIT ?")
 
-	var __embed_first_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.suspended, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success, nodes.id FROM nodes ORDER BY nodes.id LIMIT ?")
+	var __embed_first_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success, nodes.id FROM nodes ORDER BY nodes.id LIMIT ?")
 
 	var __values []interface{}
 
@@ -12136,7 +12238,7 @@ func (obj *pgxImpl) Paged_Node(ctx context.Context,
 
 			for __rows.Next() {
 				node := &Node{}
-				err = __rows.Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.Suspended, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess, &__continuation._value_id)
+				err = __rows.Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess, &__continuation._value_id)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -12209,7 +12311,7 @@ func (obj *pgxImpl) Get_Reputation_By_Id(ctx context.Context,
 	reputation *Reputation, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.suspended, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta FROM reputations WHERE reputations.id = ?")
+	var __embed_stmt = __sqlbundle_Literal("SELECT reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta FROM reputations WHERE reputations.id = ?")
 
 	var __values []interface{}
 	__values = append(__values, reputation_id.value())
@@ -12218,7 +12320,7 @@ func (obj *pgxImpl) Get_Reputation_By_Id(ctx context.Context,
 	obj.logStmt(__stmt, __values...)
 
 	reputation = &Reputation{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.Suspended, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
 	if err != nil {
 		return (*Reputation)(nil), obj.makeErr(err)
 	}
@@ -12368,6 +12470,28 @@ func (obj *pgxImpl) Get_User_ProjectLimit_By_Id(ctx context.Context,
 	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&row.ProjectLimit)
 	if err != nil {
 		return (*ProjectLimit_Row)(nil), obj.makeErr(err)
+	}
+	return row, nil
+
+}
+
+func (obj *pgxImpl) Get_User_PaidTier_By_Id(ctx context.Context,
+	user_id User_Id_Field) (
+	row *PaidTier_Row, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	var __embed_stmt = __sqlbundle_Literal("SELECT users.paid_tier FROM users WHERE users.id = ?")
+
+	var __values []interface{}
+	__values = append(__values, user_id.value())
+
+	var __stmt = __sqlbundle_Render(obj.dialect, __embed_stmt)
+	obj.logStmt(__stmt, __values...)
+
+	row = &PaidTier_Row{}
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&row.PaidTier)
+	if err != nil {
+		return (*PaidTier_Row)(nil), obj.makeErr(err)
 	}
 	return row, nil
 
@@ -14164,7 +14288,7 @@ func (obj *pgxImpl) All_CoinpaymentsTransaction_By_UserId_OrderBy_Desc_CreatedAt
 	rows []*CoinpaymentsTransaction, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount, coinpayments_transactions.received, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at FROM coinpayments_transactions WHERE coinpayments_transactions.user_id = ? ORDER BY coinpayments_transactions.created_at DESC")
+	var __embed_stmt = __sqlbundle_Literal("SELECT coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount_gob, coinpayments_transactions.amount_numeric, coinpayments_transactions.received_gob, coinpayments_transactions.received_numeric, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at FROM coinpayments_transactions WHERE coinpayments_transactions.user_id = ? ORDER BY coinpayments_transactions.created_at DESC")
 
 	var __values []interface{}
 	__values = append(__values, coinpayments_transaction_user_id.value())
@@ -14182,7 +14306,7 @@ func (obj *pgxImpl) All_CoinpaymentsTransaction_By_UserId_OrderBy_Desc_CreatedAt
 
 			for __rows.Next() {
 				coinpayments_transaction := &CoinpaymentsTransaction{}
-				err = __rows.Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.Amount, &coinpayments_transaction.Received, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
+				err = __rows.Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.AmountGob, &coinpayments_transaction.AmountNumeric, &coinpayments_transaction.ReceivedGob, &coinpayments_transaction.ReceivedNumeric, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
 				if err != nil {
 					return nil, err
 				}
@@ -14284,7 +14408,7 @@ func (obj *pgxImpl) Get_StripecoinpaymentsTxConversionRate_By_TxId(ctx context.C
 	stripecoinpayments_tx_conversion_rate *StripecoinpaymentsTxConversionRate, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT stripecoinpayments_tx_conversion_rates.tx_id, stripecoinpayments_tx_conversion_rates.rate, stripecoinpayments_tx_conversion_rates.created_at FROM stripecoinpayments_tx_conversion_rates WHERE stripecoinpayments_tx_conversion_rates.tx_id = ?")
+	var __embed_stmt = __sqlbundle_Literal("SELECT stripecoinpayments_tx_conversion_rates.tx_id, stripecoinpayments_tx_conversion_rates.rate_gob, stripecoinpayments_tx_conversion_rates.rate_numeric, stripecoinpayments_tx_conversion_rates.created_at FROM stripecoinpayments_tx_conversion_rates WHERE stripecoinpayments_tx_conversion_rates.tx_id = ?")
 
 	var __values []interface{}
 	__values = append(__values, stripecoinpayments_tx_conversion_rate_tx_id.value())
@@ -14293,7 +14417,7 @@ func (obj *pgxImpl) Get_StripecoinpaymentsTxConversionRate_By_TxId(ctx context.C
 	obj.logStmt(__stmt, __values...)
 
 	stripecoinpayments_tx_conversion_rate = &StripecoinpaymentsTxConversionRate{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&stripecoinpayments_tx_conversion_rate.TxId, &stripecoinpayments_tx_conversion_rate.Rate, &stripecoinpayments_tx_conversion_rate.CreatedAt)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&stripecoinpayments_tx_conversion_rate.TxId, &stripecoinpayments_tx_conversion_rate.RateGob, &stripecoinpayments_tx_conversion_rate.RateNumeric, &stripecoinpayments_tx_conversion_rate.CreatedAt)
 	if err != nil {
 		return (*StripecoinpaymentsTxConversionRate)(nil), obj.makeErr(err)
 	}
@@ -14624,12 +14748,12 @@ func (obj *pgxImpl) Get_OauthClient_By_Id(ctx context.Context,
 
 }
 
-func (obj *pgxImpl) Get_OauthCode_By_Code(ctx context.Context,
+func (obj *pgxImpl) Get_OauthCode_By_Code_And_ClaimedAt_Is_Null(ctx context.Context,
 	oauth_code_code OauthCode_Code_Field) (
 	oauth_code *OauthCode, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT oauth_codes.client_id, oauth_codes.user_id, oauth_codes.scope, oauth_codes.redirect_url, oauth_codes.challenge, oauth_codes.challenge_method, oauth_codes.code, oauth_codes.created_at, oauth_codes.expires_at, oauth_codes.claimed_at FROM oauth_codes WHERE oauth_codes.code = ?")
+	var __embed_stmt = __sqlbundle_Literal("SELECT oauth_codes.client_id, oauth_codes.user_id, oauth_codes.scope, oauth_codes.redirect_url, oauth_codes.challenge, oauth_codes.challenge_method, oauth_codes.code, oauth_codes.created_at, oauth_codes.expires_at, oauth_codes.claimed_at FROM oauth_codes WHERE oauth_codes.code = ? AND oauth_codes.claimed_at is NULL")
 
 	var __values []interface{}
 	__values = append(__values, oauth_code_code.value())
@@ -14713,7 +14837,7 @@ func (obj *pgxImpl) Update_Node_By_Id(ctx context.Context,
 	defer mon.Task()(&ctx)(&err)
 	var __sets = &__sqlbundle_Hole{}
 
-	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE nodes SET "), __sets, __sqlbundle_Literal(" WHERE nodes.id = ? RETURNING nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.suspended, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success")}}
+	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE nodes SET "), __sets, __sqlbundle_Literal(" WHERE nodes.id = ? RETURNING nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success")}}
 
 	__sets_sql := __sqlbundle_Literals{Join: ", "}
 	var __values []interface{}
@@ -14834,11 +14958,6 @@ func (obj *pgxImpl) Update_Node_By_Id(ctx context.Context,
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualification_reason = ?"))
 	}
 
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
-	}
-
 	if update.UnknownAuditSuspended._set {
 		__values = append(__values, update.UnknownAuditSuspended.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("unknown_audit_suspended = ?"))
@@ -14888,7 +15007,7 @@ func (obj *pgxImpl) Update_Node_By_Id(ctx context.Context,
 	obj.logStmt(__stmt, __values...)
 
 	node = &Node{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.Suspended, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -15024,11 +15143,6 @@ func (obj *pgxImpl) UpdateNoReturn_Node_By_Id(ctx context.Context,
 	if update.DisqualificationReason._set {
 		__values = append(__values, update.DisqualificationReason.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualification_reason = ?"))
-	}
-
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
 	}
 
 	if update.UnknownAuditSuspended._set {
@@ -15214,11 +15328,6 @@ func (obj *pgxImpl) UpdateNoReturn_Node_By_Id_And_Disqualified_Is_Null_And_ExitF
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualification_reason = ?"))
 	}
 
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
-	}
-
 	if update.UnknownAuditSuspended._set {
 		__values = append(__values, update.UnknownAuditSuspended.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("unknown_audit_suspended = ?"))
@@ -15281,7 +15390,7 @@ func (obj *pgxImpl) Update_Reputation_By_Id(ctx context.Context,
 	defer mon.Task()(&ctx)(&err)
 	var __sets = &__sqlbundle_Hole{}
 
-	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE reputations SET "), __sets, __sqlbundle_Literal(" WHERE reputations.id = ? RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.suspended, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
+	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE reputations SET "), __sets, __sqlbundle_Literal(" WHERE reputations.id = ? RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
 
 	__sets_sql := __sqlbundle_Literals{Join: ", "}
 	var __values []interface{}
@@ -15305,11 +15414,6 @@ func (obj *pgxImpl) Update_Reputation_By_Id(ctx context.Context,
 	if update.Disqualified._set {
 		__values = append(__values, update.Disqualified.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualified = ?"))
-	}
-
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
 	}
 
 	if update.UnknownAuditSuspended._set {
@@ -15371,7 +15475,7 @@ func (obj *pgxImpl) Update_Reputation_By_Id(ctx context.Context,
 	obj.logStmt(__stmt, __values...)
 
 	reputation = &Reputation{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.Suspended, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -15389,7 +15493,7 @@ func (obj *pgxImpl) Update_Reputation_By_Id_And_AuditHistory(ctx context.Context
 	defer mon.Task()(&ctx)(&err)
 	var __sets = &__sqlbundle_Hole{}
 
-	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE reputations SET "), __sets, __sqlbundle_Literal(" WHERE reputations.id = ? AND reputations.audit_history = ? RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.suspended, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
+	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE reputations SET "), __sets, __sqlbundle_Literal(" WHERE reputations.id = ? AND reputations.audit_history = ? RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
 
 	__sets_sql := __sqlbundle_Literals{Join: ", "}
 	var __values []interface{}
@@ -15413,11 +15517,6 @@ func (obj *pgxImpl) Update_Reputation_By_Id_And_AuditHistory(ctx context.Context
 	if update.Disqualified._set {
 		__values = append(__values, update.Disqualified.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualified = ?"))
-	}
-
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
 	}
 
 	if update.UnknownAuditSuspended._set {
@@ -15479,7 +15578,7 @@ func (obj *pgxImpl) Update_Reputation_By_Id_And_AuditHistory(ctx context.Context
 	obj.logStmt(__stmt, __values...)
 
 	reputation = &Reputation{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.Suspended, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -15520,11 +15619,6 @@ func (obj *pgxImpl) UpdateNoReturn_Reputation_By_Id(ctx context.Context,
 	if update.Disqualified._set {
 		__values = append(__values, update.Disqualified.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualified = ?"))
-	}
-
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
 	}
 
 	if update.UnknownAuditSuspended._set {
@@ -16114,15 +16208,30 @@ func (obj *pgxImpl) Update_CoinpaymentsTransaction_By_Id(ctx context.Context,
 	defer mon.Task()(&ctx)(&err)
 	var __sets = &__sqlbundle_Hole{}
 
-	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE coinpayments_transactions SET "), __sets, __sqlbundle_Literal(" WHERE coinpayments_transactions.id = ? RETURNING coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount, coinpayments_transactions.received, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at")}}
+	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE coinpayments_transactions SET "), __sets, __sqlbundle_Literal(" WHERE coinpayments_transactions.id = ? RETURNING coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount_gob, coinpayments_transactions.amount_numeric, coinpayments_transactions.received_gob, coinpayments_transactions.received_numeric, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at")}}
 
 	__sets_sql := __sqlbundle_Literals{Join: ", "}
 	var __values []interface{}
 	var __args []interface{}
 
-	if update.Received._set {
-		__values = append(__values, update.Received.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("received = ?"))
+	if update.AmountGob._set {
+		__values = append(__values, update.AmountGob.value())
+		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("amount_gob = ?"))
+	}
+
+	if update.AmountNumeric._set {
+		__values = append(__values, update.AmountNumeric.value())
+		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("amount_numeric = ?"))
+	}
+
+	if update.ReceivedGob._set {
+		__values = append(__values, update.ReceivedGob.value())
+		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("received_gob = ?"))
+	}
+
+	if update.ReceivedNumeric._set {
+		__values = append(__values, update.ReceivedNumeric.value())
+		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("received_numeric = ?"))
 	}
 
 	if update.Status._set {
@@ -16143,7 +16252,7 @@ func (obj *pgxImpl) Update_CoinpaymentsTransaction_By_Id(ctx context.Context,
 	obj.logStmt(__stmt, __values...)
 
 	coinpayments_transaction = &CoinpaymentsTransaction{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.Amount, &coinpayments_transaction.Received, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.AmountGob, &coinpayments_transaction.AmountNumeric, &coinpayments_transaction.ReceivedGob, &coinpayments_transaction.ReceivedNumeric, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -17302,20 +17411,19 @@ func (obj *pgxcockroachImpl) Create_Reputation(ctx context.Context,
 	__id_val := reputation_id.value()
 	__vetted_at_val := optional.VettedAt.value()
 	__disqualified_val := optional.Disqualified.value()
-	__suspended_val := optional.Suspended.value()
 	__unknown_audit_suspended_val := optional.UnknownAuditSuspended.value()
 	__offline_suspended_val := optional.OfflineSuspended.value()
 	__under_review_val := optional.UnderReview.value()
 	__audit_history_val := reputation_audit_history.value()
 
-	var __columns = &__sqlbundle_Hole{SQL: __sqlbundle_Literal("id, vetted_at, disqualified, suspended, unknown_audit_suspended, offline_suspended, under_review, audit_history")}
-	var __placeholders = &__sqlbundle_Hole{SQL: __sqlbundle_Literal("?, ?, ?, ?, ?, ?, ?, ?")}
+	var __columns = &__sqlbundle_Hole{SQL: __sqlbundle_Literal("id, vetted_at, disqualified, unknown_audit_suspended, offline_suspended, under_review, audit_history")}
+	var __placeholders = &__sqlbundle_Hole{SQL: __sqlbundle_Literal("?, ?, ?, ?, ?, ?, ?")}
 	var __clause = &__sqlbundle_Hole{SQL: __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("("), __columns, __sqlbundle_Literal(") VALUES ("), __placeholders, __sqlbundle_Literal(")")}}}
 
-	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("INSERT INTO reputations "), __clause, __sqlbundle_Literal(" RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.suspended, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
+	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("INSERT INTO reputations "), __clause, __sqlbundle_Literal(" RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
 
 	var __values []interface{}
-	__values = append(__values, __id_val, __vetted_at_val, __disqualified_val, __suspended_val, __unknown_audit_suspended_val, __offline_suspended_val, __under_review_val, __audit_history_val)
+	__values = append(__values, __id_val, __vetted_at_val, __disqualified_val, __unknown_audit_suspended_val, __offline_suspended_val, __under_review_val, __audit_history_val)
 
 	__optional_columns := __sqlbundle_Literals{Join: ", "}
 	__optional_placeholders := __sqlbundle_Literals{Join: ", "}
@@ -17374,7 +17482,7 @@ func (obj *pgxcockroachImpl) Create_Reputation(ctx context.Context,
 	obj.logStmt(__stmt, __values...)
 
 	reputation = &Reputation{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.Suspended, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
 	if err != nil {
 		return nil, obj.makeErr(err)
 	}
@@ -17966,11 +18074,10 @@ func (obj *pgxcockroachImpl) Create_CoinpaymentsTransaction(ctx context.Context,
 	coinpayments_transaction_id CoinpaymentsTransaction_Id_Field,
 	coinpayments_transaction_user_id CoinpaymentsTransaction_UserId_Field,
 	coinpayments_transaction_address CoinpaymentsTransaction_Address_Field,
-	coinpayments_transaction_amount CoinpaymentsTransaction_Amount_Field,
-	coinpayments_transaction_received CoinpaymentsTransaction_Received_Field,
 	coinpayments_transaction_status CoinpaymentsTransaction_Status_Field,
 	coinpayments_transaction_key CoinpaymentsTransaction_Key_Field,
-	coinpayments_transaction_timeout CoinpaymentsTransaction_Timeout_Field) (
+	coinpayments_transaction_timeout CoinpaymentsTransaction_Timeout_Field,
+	optional CoinpaymentsTransaction_Create_Fields) (
 	coinpayments_transaction *CoinpaymentsTransaction, err error) {
 	defer mon.Task()(&ctx)(&err)
 
@@ -17978,23 +18085,25 @@ func (obj *pgxcockroachImpl) Create_CoinpaymentsTransaction(ctx context.Context,
 	__id_val := coinpayments_transaction_id.value()
 	__user_id_val := coinpayments_transaction_user_id.value()
 	__address_val := coinpayments_transaction_address.value()
-	__amount_val := coinpayments_transaction_amount.value()
-	__received_val := coinpayments_transaction_received.value()
+	__amount_gob_val := optional.AmountGob.value()
+	__amount_numeric_val := optional.AmountNumeric.value()
+	__received_gob_val := optional.ReceivedGob.value()
+	__received_numeric_val := optional.ReceivedNumeric.value()
 	__status_val := coinpayments_transaction_status.value()
 	__key_val := coinpayments_transaction_key.value()
 	__timeout_val := coinpayments_transaction_timeout.value()
 	__created_at_val := __now
 
-	var __embed_stmt = __sqlbundle_Literal("INSERT INTO coinpayments_transactions ( id, user_id, address, amount, received, status, key, timeout, created_at ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ? ) RETURNING coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount, coinpayments_transactions.received, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at")
+	var __embed_stmt = __sqlbundle_Literal("INSERT INTO coinpayments_transactions ( id, user_id, address, amount_gob, amount_numeric, received_gob, received_numeric, status, key, timeout, created_at ) VALUES ( ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? ) RETURNING coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount_gob, coinpayments_transactions.amount_numeric, coinpayments_transactions.received_gob, coinpayments_transactions.received_numeric, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at")
 
 	var __values []interface{}
-	__values = append(__values, __id_val, __user_id_val, __address_val, __amount_val, __received_val, __status_val, __key_val, __timeout_val, __created_at_val)
+	__values = append(__values, __id_val, __user_id_val, __address_val, __amount_gob_val, __amount_numeric_val, __received_gob_val, __received_numeric_val, __status_val, __key_val, __timeout_val, __created_at_val)
 
 	var __stmt = __sqlbundle_Render(obj.dialect, __embed_stmt)
 	obj.logStmt(__stmt, __values...)
 
 	coinpayments_transaction = &CoinpaymentsTransaction{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.Amount, &coinpayments_transaction.Received, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.AmountGob, &coinpayments_transaction.AmountNumeric, &coinpayments_transaction.ReceivedGob, &coinpayments_transaction.ReceivedNumeric, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
 	if err != nil {
 		return nil, obj.makeErr(err)
 	}
@@ -18045,25 +18154,26 @@ func (obj *pgxcockroachImpl) Create_StripecoinpaymentsInvoiceProjectRecord(ctx c
 
 func (obj *pgxcockroachImpl) Create_StripecoinpaymentsTxConversionRate(ctx context.Context,
 	stripecoinpayments_tx_conversion_rate_tx_id StripecoinpaymentsTxConversionRate_TxId_Field,
-	stripecoinpayments_tx_conversion_rate_rate StripecoinpaymentsTxConversionRate_Rate_Field) (
+	optional StripecoinpaymentsTxConversionRate_Create_Fields) (
 	stripecoinpayments_tx_conversion_rate *StripecoinpaymentsTxConversionRate, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	__now := obj.db.Hooks.Now().UTC()
 	__tx_id_val := stripecoinpayments_tx_conversion_rate_tx_id.value()
-	__rate_val := stripecoinpayments_tx_conversion_rate_rate.value()
+	__rate_gob_val := optional.RateGob.value()
+	__rate_numeric_val := optional.RateNumeric.value()
 	__created_at_val := __now
 
-	var __embed_stmt = __sqlbundle_Literal("INSERT INTO stripecoinpayments_tx_conversion_rates ( tx_id, rate, created_at ) VALUES ( ?, ?, ? ) RETURNING stripecoinpayments_tx_conversion_rates.tx_id, stripecoinpayments_tx_conversion_rates.rate, stripecoinpayments_tx_conversion_rates.created_at")
+	var __embed_stmt = __sqlbundle_Literal("INSERT INTO stripecoinpayments_tx_conversion_rates ( tx_id, rate_gob, rate_numeric, created_at ) VALUES ( ?, ?, ?, ? ) RETURNING stripecoinpayments_tx_conversion_rates.tx_id, stripecoinpayments_tx_conversion_rates.rate_gob, stripecoinpayments_tx_conversion_rates.rate_numeric, stripecoinpayments_tx_conversion_rates.created_at")
 
 	var __values []interface{}
-	__values = append(__values, __tx_id_val, __rate_val, __created_at_val)
+	__values = append(__values, __tx_id_val, __rate_gob_val, __rate_numeric_val, __created_at_val)
 
 	var __stmt = __sqlbundle_Render(obj.dialect, __embed_stmt)
 	obj.logStmt(__stmt, __values...)
 
 	stripecoinpayments_tx_conversion_rate = &StripecoinpaymentsTxConversionRate{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&stripecoinpayments_tx_conversion_rate.TxId, &stripecoinpayments_tx_conversion_rate.Rate, &stripecoinpayments_tx_conversion_rate.CreatedAt)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&stripecoinpayments_tx_conversion_rate.TxId, &stripecoinpayments_tx_conversion_rate.RateGob, &stripecoinpayments_tx_conversion_rate.RateNumeric, &stripecoinpayments_tx_conversion_rate.CreatedAt)
 	if err != nil {
 		return nil, obj.makeErr(err)
 	}
@@ -18389,7 +18499,7 @@ func (obj *pgxcockroachImpl) Get_Node_By_Id(ctx context.Context,
 	node *Node, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.suspended, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success FROM nodes WHERE nodes.id = ?")
+	var __embed_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success FROM nodes WHERE nodes.id = ?")
 
 	var __values []interface{}
 	__values = append(__values, node_id.value())
@@ -18398,7 +18508,7 @@ func (obj *pgxcockroachImpl) Get_Node_By_Id(ctx context.Context,
 	obj.logStmt(__stmt, __values...)
 
 	node = &Node{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.Suspended, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess)
 	if err != nil {
 		return (*Node)(nil), obj.makeErr(err)
 	}
@@ -18454,9 +18564,9 @@ func (obj *pgxcockroachImpl) Paged_Node(ctx context.Context,
 	rows []*Node, next *Paged_Node_Continuation, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.suspended, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success, nodes.id FROM nodes WHERE (nodes.id) > ? ORDER BY nodes.id LIMIT ?")
+	var __embed_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success, nodes.id FROM nodes WHERE (nodes.id) > ? ORDER BY nodes.id LIMIT ?")
 
-	var __embed_first_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.suspended, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success, nodes.id FROM nodes ORDER BY nodes.id LIMIT ?")
+	var __embed_first_stmt = __sqlbundle_Literal("SELECT nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success, nodes.id FROM nodes ORDER BY nodes.id LIMIT ?")
 
 	var __values []interface{}
 
@@ -18483,7 +18593,7 @@ func (obj *pgxcockroachImpl) Paged_Node(ctx context.Context,
 
 			for __rows.Next() {
 				node := &Node{}
-				err = __rows.Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.Suspended, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess, &__continuation._value_id)
+				err = __rows.Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess, &__continuation._value_id)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -18556,7 +18666,7 @@ func (obj *pgxcockroachImpl) Get_Reputation_By_Id(ctx context.Context,
 	reputation *Reputation, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.suspended, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta FROM reputations WHERE reputations.id = ?")
+	var __embed_stmt = __sqlbundle_Literal("SELECT reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta FROM reputations WHERE reputations.id = ?")
 
 	var __values []interface{}
 	__values = append(__values, reputation_id.value())
@@ -18565,7 +18675,7 @@ func (obj *pgxcockroachImpl) Get_Reputation_By_Id(ctx context.Context,
 	obj.logStmt(__stmt, __values...)
 
 	reputation = &Reputation{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.Suspended, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
 	if err != nil {
 		return (*Reputation)(nil), obj.makeErr(err)
 	}
@@ -18715,6 +18825,28 @@ func (obj *pgxcockroachImpl) Get_User_ProjectLimit_By_Id(ctx context.Context,
 	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&row.ProjectLimit)
 	if err != nil {
 		return (*ProjectLimit_Row)(nil), obj.makeErr(err)
+	}
+	return row, nil
+
+}
+
+func (obj *pgxcockroachImpl) Get_User_PaidTier_By_Id(ctx context.Context,
+	user_id User_Id_Field) (
+	row *PaidTier_Row, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	var __embed_stmt = __sqlbundle_Literal("SELECT users.paid_tier FROM users WHERE users.id = ?")
+
+	var __values []interface{}
+	__values = append(__values, user_id.value())
+
+	var __stmt = __sqlbundle_Render(obj.dialect, __embed_stmt)
+	obj.logStmt(__stmt, __values...)
+
+	row = &PaidTier_Row{}
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&row.PaidTier)
+	if err != nil {
+		return (*PaidTier_Row)(nil), obj.makeErr(err)
 	}
 	return row, nil
 
@@ -20511,7 +20643,7 @@ func (obj *pgxcockroachImpl) All_CoinpaymentsTransaction_By_UserId_OrderBy_Desc_
 	rows []*CoinpaymentsTransaction, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount, coinpayments_transactions.received, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at FROM coinpayments_transactions WHERE coinpayments_transactions.user_id = ? ORDER BY coinpayments_transactions.created_at DESC")
+	var __embed_stmt = __sqlbundle_Literal("SELECT coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount_gob, coinpayments_transactions.amount_numeric, coinpayments_transactions.received_gob, coinpayments_transactions.received_numeric, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at FROM coinpayments_transactions WHERE coinpayments_transactions.user_id = ? ORDER BY coinpayments_transactions.created_at DESC")
 
 	var __values []interface{}
 	__values = append(__values, coinpayments_transaction_user_id.value())
@@ -20529,7 +20661,7 @@ func (obj *pgxcockroachImpl) All_CoinpaymentsTransaction_By_UserId_OrderBy_Desc_
 
 			for __rows.Next() {
 				coinpayments_transaction := &CoinpaymentsTransaction{}
-				err = __rows.Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.Amount, &coinpayments_transaction.Received, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
+				err = __rows.Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.AmountGob, &coinpayments_transaction.AmountNumeric, &coinpayments_transaction.ReceivedGob, &coinpayments_transaction.ReceivedNumeric, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
 				if err != nil {
 					return nil, err
 				}
@@ -20631,7 +20763,7 @@ func (obj *pgxcockroachImpl) Get_StripecoinpaymentsTxConversionRate_By_TxId(ctx 
 	stripecoinpayments_tx_conversion_rate *StripecoinpaymentsTxConversionRate, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT stripecoinpayments_tx_conversion_rates.tx_id, stripecoinpayments_tx_conversion_rates.rate, stripecoinpayments_tx_conversion_rates.created_at FROM stripecoinpayments_tx_conversion_rates WHERE stripecoinpayments_tx_conversion_rates.tx_id = ?")
+	var __embed_stmt = __sqlbundle_Literal("SELECT stripecoinpayments_tx_conversion_rates.tx_id, stripecoinpayments_tx_conversion_rates.rate_gob, stripecoinpayments_tx_conversion_rates.rate_numeric, stripecoinpayments_tx_conversion_rates.created_at FROM stripecoinpayments_tx_conversion_rates WHERE stripecoinpayments_tx_conversion_rates.tx_id = ?")
 
 	var __values []interface{}
 	__values = append(__values, stripecoinpayments_tx_conversion_rate_tx_id.value())
@@ -20640,7 +20772,7 @@ func (obj *pgxcockroachImpl) Get_StripecoinpaymentsTxConversionRate_By_TxId(ctx 
 	obj.logStmt(__stmt, __values...)
 
 	stripecoinpayments_tx_conversion_rate = &StripecoinpaymentsTxConversionRate{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&stripecoinpayments_tx_conversion_rate.TxId, &stripecoinpayments_tx_conversion_rate.Rate, &stripecoinpayments_tx_conversion_rate.CreatedAt)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&stripecoinpayments_tx_conversion_rate.TxId, &stripecoinpayments_tx_conversion_rate.RateGob, &stripecoinpayments_tx_conversion_rate.RateNumeric, &stripecoinpayments_tx_conversion_rate.CreatedAt)
 	if err != nil {
 		return (*StripecoinpaymentsTxConversionRate)(nil), obj.makeErr(err)
 	}
@@ -20971,12 +21103,12 @@ func (obj *pgxcockroachImpl) Get_OauthClient_By_Id(ctx context.Context,
 
 }
 
-func (obj *pgxcockroachImpl) Get_OauthCode_By_Code(ctx context.Context,
+func (obj *pgxcockroachImpl) Get_OauthCode_By_Code_And_ClaimedAt_Is_Null(ctx context.Context,
 	oauth_code_code OauthCode_Code_Field) (
 	oauth_code *OauthCode, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var __embed_stmt = __sqlbundle_Literal("SELECT oauth_codes.client_id, oauth_codes.user_id, oauth_codes.scope, oauth_codes.redirect_url, oauth_codes.challenge, oauth_codes.challenge_method, oauth_codes.code, oauth_codes.created_at, oauth_codes.expires_at, oauth_codes.claimed_at FROM oauth_codes WHERE oauth_codes.code = ?")
+	var __embed_stmt = __sqlbundle_Literal("SELECT oauth_codes.client_id, oauth_codes.user_id, oauth_codes.scope, oauth_codes.redirect_url, oauth_codes.challenge, oauth_codes.challenge_method, oauth_codes.code, oauth_codes.created_at, oauth_codes.expires_at, oauth_codes.claimed_at FROM oauth_codes WHERE oauth_codes.code = ? AND oauth_codes.claimed_at is NULL")
 
 	var __values []interface{}
 	__values = append(__values, oauth_code_code.value())
@@ -21060,7 +21192,7 @@ func (obj *pgxcockroachImpl) Update_Node_By_Id(ctx context.Context,
 	defer mon.Task()(&ctx)(&err)
 	var __sets = &__sqlbundle_Hole{}
 
-	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE nodes SET "), __sets, __sqlbundle_Literal(" WHERE nodes.id = ? RETURNING nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.suspended, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success")}}
+	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE nodes SET "), __sets, __sqlbundle_Literal(" WHERE nodes.id = ? RETURNING nodes.id, nodes.address, nodes.last_net, nodes.last_ip_port, nodes.country_code, nodes.protocol, nodes.type, nodes.email, nodes.wallet, nodes.wallet_features, nodes.free_disk, nodes.piece_count, nodes.major, nodes.minor, nodes.patch, nodes.hash, nodes.timestamp, nodes.release, nodes.latency_90, nodes.vetted_at, nodes.created_at, nodes.updated_at, nodes.last_contact_success, nodes.last_contact_failure, nodes.disqualified, nodes.disqualification_reason, nodes.unknown_audit_suspended, nodes.offline_suspended, nodes.under_review, nodes.exit_initiated_at, nodes.exit_loop_completed_at, nodes.exit_finished_at, nodes.exit_success")}}
 
 	__sets_sql := __sqlbundle_Literals{Join: ", "}
 	var __values []interface{}
@@ -21181,11 +21313,6 @@ func (obj *pgxcockroachImpl) Update_Node_By_Id(ctx context.Context,
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualification_reason = ?"))
 	}
 
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
-	}
-
 	if update.UnknownAuditSuspended._set {
 		__values = append(__values, update.UnknownAuditSuspended.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("unknown_audit_suspended = ?"))
@@ -21235,7 +21362,7 @@ func (obj *pgxcockroachImpl) Update_Node_By_Id(ctx context.Context,
 	obj.logStmt(__stmt, __values...)
 
 	node = &Node{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.Suspended, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&node.Id, &node.Address, &node.LastNet, &node.LastIpPort, &node.CountryCode, &node.Protocol, &node.Type, &node.Email, &node.Wallet, &node.WalletFeatures, &node.FreeDisk, &node.PieceCount, &node.Major, &node.Minor, &node.Patch, &node.Hash, &node.Timestamp, &node.Release, &node.Latency90, &node.VettedAt, &node.CreatedAt, &node.UpdatedAt, &node.LastContactSuccess, &node.LastContactFailure, &node.Disqualified, &node.DisqualificationReason, &node.UnknownAuditSuspended, &node.OfflineSuspended, &node.UnderReview, &node.ExitInitiatedAt, &node.ExitLoopCompletedAt, &node.ExitFinishedAt, &node.ExitSuccess)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -21371,11 +21498,6 @@ func (obj *pgxcockroachImpl) UpdateNoReturn_Node_By_Id(ctx context.Context,
 	if update.DisqualificationReason._set {
 		__values = append(__values, update.DisqualificationReason.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualification_reason = ?"))
-	}
-
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
 	}
 
 	if update.UnknownAuditSuspended._set {
@@ -21561,11 +21683,6 @@ func (obj *pgxcockroachImpl) UpdateNoReturn_Node_By_Id_And_Disqualified_Is_Null_
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualification_reason = ?"))
 	}
 
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
-	}
-
 	if update.UnknownAuditSuspended._set {
 		__values = append(__values, update.UnknownAuditSuspended.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("unknown_audit_suspended = ?"))
@@ -21628,7 +21745,7 @@ func (obj *pgxcockroachImpl) Update_Reputation_By_Id(ctx context.Context,
 	defer mon.Task()(&ctx)(&err)
 	var __sets = &__sqlbundle_Hole{}
 
-	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE reputations SET "), __sets, __sqlbundle_Literal(" WHERE reputations.id = ? RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.suspended, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
+	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE reputations SET "), __sets, __sqlbundle_Literal(" WHERE reputations.id = ? RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
 
 	__sets_sql := __sqlbundle_Literals{Join: ", "}
 	var __values []interface{}
@@ -21652,11 +21769,6 @@ func (obj *pgxcockroachImpl) Update_Reputation_By_Id(ctx context.Context,
 	if update.Disqualified._set {
 		__values = append(__values, update.Disqualified.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualified = ?"))
-	}
-
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
 	}
 
 	if update.UnknownAuditSuspended._set {
@@ -21718,7 +21830,7 @@ func (obj *pgxcockroachImpl) Update_Reputation_By_Id(ctx context.Context,
 	obj.logStmt(__stmt, __values...)
 
 	reputation = &Reputation{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.Suspended, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -21736,7 +21848,7 @@ func (obj *pgxcockroachImpl) Update_Reputation_By_Id_And_AuditHistory(ctx contex
 	defer mon.Task()(&ctx)(&err)
 	var __sets = &__sqlbundle_Hole{}
 
-	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE reputations SET "), __sets, __sqlbundle_Literal(" WHERE reputations.id = ? AND reputations.audit_history = ? RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.suspended, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
+	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE reputations SET "), __sets, __sqlbundle_Literal(" WHERE reputations.id = ? AND reputations.audit_history = ? RETURNING reputations.id, reputations.audit_success_count, reputations.total_audit_count, reputations.vetted_at, reputations.created_at, reputations.updated_at, reputations.disqualified, reputations.unknown_audit_suspended, reputations.offline_suspended, reputations.under_review, reputations.online_score, reputations.audit_history, reputations.audit_reputation_alpha, reputations.audit_reputation_beta, reputations.unknown_audit_reputation_alpha, reputations.unknown_audit_reputation_beta")}}
 
 	__sets_sql := __sqlbundle_Literals{Join: ", "}
 	var __values []interface{}
@@ -21760,11 +21872,6 @@ func (obj *pgxcockroachImpl) Update_Reputation_By_Id_And_AuditHistory(ctx contex
 	if update.Disqualified._set {
 		__values = append(__values, update.Disqualified.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualified = ?"))
-	}
-
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
 	}
 
 	if update.UnknownAuditSuspended._set {
@@ -21826,7 +21933,7 @@ func (obj *pgxcockroachImpl) Update_Reputation_By_Id_And_AuditHistory(ctx contex
 	obj.logStmt(__stmt, __values...)
 
 	reputation = &Reputation{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.Suspended, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&reputation.Id, &reputation.AuditSuccessCount, &reputation.TotalAuditCount, &reputation.VettedAt, &reputation.CreatedAt, &reputation.UpdatedAt, &reputation.Disqualified, &reputation.UnknownAuditSuspended, &reputation.OfflineSuspended, &reputation.UnderReview, &reputation.OnlineScore, &reputation.AuditHistory, &reputation.AuditReputationAlpha, &reputation.AuditReputationBeta, &reputation.UnknownAuditReputationAlpha, &reputation.UnknownAuditReputationBeta)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -21867,11 +21974,6 @@ func (obj *pgxcockroachImpl) UpdateNoReturn_Reputation_By_Id(ctx context.Context
 	if update.Disqualified._set {
 		__values = append(__values, update.Disqualified.value())
 		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("disqualified = ?"))
-	}
-
-	if update.Suspended._set {
-		__values = append(__values, update.Suspended.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("suspended = ?"))
 	}
 
 	if update.UnknownAuditSuspended._set {
@@ -22461,15 +22563,30 @@ func (obj *pgxcockroachImpl) Update_CoinpaymentsTransaction_By_Id(ctx context.Co
 	defer mon.Task()(&ctx)(&err)
 	var __sets = &__sqlbundle_Hole{}
 
-	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE coinpayments_transactions SET "), __sets, __sqlbundle_Literal(" WHERE coinpayments_transactions.id = ? RETURNING coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount, coinpayments_transactions.received, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at")}}
+	var __embed_stmt = __sqlbundle_Literals{Join: "", SQLs: []__sqlbundle_SQL{__sqlbundle_Literal("UPDATE coinpayments_transactions SET "), __sets, __sqlbundle_Literal(" WHERE coinpayments_transactions.id = ? RETURNING coinpayments_transactions.id, coinpayments_transactions.user_id, coinpayments_transactions.address, coinpayments_transactions.amount_gob, coinpayments_transactions.amount_numeric, coinpayments_transactions.received_gob, coinpayments_transactions.received_numeric, coinpayments_transactions.status, coinpayments_transactions.key, coinpayments_transactions.timeout, coinpayments_transactions.created_at")}}
 
 	__sets_sql := __sqlbundle_Literals{Join: ", "}
 	var __values []interface{}
 	var __args []interface{}
 
-	if update.Received._set {
-		__values = append(__values, update.Received.value())
-		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("received = ?"))
+	if update.AmountGob._set {
+		__values = append(__values, update.AmountGob.value())
+		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("amount_gob = ?"))
+	}
+
+	if update.AmountNumeric._set {
+		__values = append(__values, update.AmountNumeric.value())
+		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("amount_numeric = ?"))
+	}
+
+	if update.ReceivedGob._set {
+		__values = append(__values, update.ReceivedGob.value())
+		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("received_gob = ?"))
+	}
+
+	if update.ReceivedNumeric._set {
+		__values = append(__values, update.ReceivedNumeric.value())
+		__sets_sql.SQLs = append(__sets_sql.SQLs, __sqlbundle_Literal("received_numeric = ?"))
 	}
 
 	if update.Status._set {
@@ -22490,7 +22607,7 @@ func (obj *pgxcockroachImpl) Update_CoinpaymentsTransaction_By_Id(ctx context.Co
 	obj.logStmt(__stmt, __values...)
 
 	coinpayments_transaction = &CoinpaymentsTransaction{}
-	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.Amount, &coinpayments_transaction.Received, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
+	err = obj.queryRowContext(ctx, __stmt, __values...).Scan(&coinpayments_transaction.Id, &coinpayments_transaction.UserId, &coinpayments_transaction.Address, &coinpayments_transaction.AmountGob, &coinpayments_transaction.AmountNumeric, &coinpayments_transaction.ReceivedGob, &coinpayments_transaction.ReceivedNumeric, &coinpayments_transaction.Status, &coinpayments_transaction.Key, &coinpayments_transaction.Timeout, &coinpayments_transaction.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -23932,17 +24049,16 @@ func (rx *Rx) Create_CoinpaymentsTransaction(ctx context.Context,
 	coinpayments_transaction_id CoinpaymentsTransaction_Id_Field,
 	coinpayments_transaction_user_id CoinpaymentsTransaction_UserId_Field,
 	coinpayments_transaction_address CoinpaymentsTransaction_Address_Field,
-	coinpayments_transaction_amount CoinpaymentsTransaction_Amount_Field,
-	coinpayments_transaction_received CoinpaymentsTransaction_Received_Field,
 	coinpayments_transaction_status CoinpaymentsTransaction_Status_Field,
 	coinpayments_transaction_key CoinpaymentsTransaction_Key_Field,
-	coinpayments_transaction_timeout CoinpaymentsTransaction_Timeout_Field) (
+	coinpayments_transaction_timeout CoinpaymentsTransaction_Timeout_Field,
+	optional CoinpaymentsTransaction_Create_Fields) (
 	coinpayments_transaction *CoinpaymentsTransaction, err error) {
 	var tx *Tx
 	if tx, err = rx.getTx(ctx); err != nil {
 		return
 	}
-	return tx.Create_CoinpaymentsTransaction(ctx, coinpayments_transaction_id, coinpayments_transaction_user_id, coinpayments_transaction_address, coinpayments_transaction_amount, coinpayments_transaction_received, coinpayments_transaction_status, coinpayments_transaction_key, coinpayments_transaction_timeout)
+	return tx.Create_CoinpaymentsTransaction(ctx, coinpayments_transaction_id, coinpayments_transaction_user_id, coinpayments_transaction_address, coinpayments_transaction_status, coinpayments_transaction_key, coinpayments_transaction_timeout, optional)
 
 }
 
@@ -24160,13 +24276,13 @@ func (rx *Rx) Create_StripecoinpaymentsInvoiceProjectRecord(ctx context.Context,
 
 func (rx *Rx) Create_StripecoinpaymentsTxConversionRate(ctx context.Context,
 	stripecoinpayments_tx_conversion_rate_tx_id StripecoinpaymentsTxConversionRate_TxId_Field,
-	stripecoinpayments_tx_conversion_rate_rate StripecoinpaymentsTxConversionRate_Rate_Field) (
+	optional StripecoinpaymentsTxConversionRate_Create_Fields) (
 	stripecoinpayments_tx_conversion_rate *StripecoinpaymentsTxConversionRate, err error) {
 	var tx *Tx
 	if tx, err = rx.getTx(ctx); err != nil {
 		return
 	}
-	return tx.Create_StripecoinpaymentsTxConversionRate(ctx, stripecoinpayments_tx_conversion_rate_tx_id, stripecoinpayments_tx_conversion_rate_rate)
+	return tx.Create_StripecoinpaymentsTxConversionRate(ctx, stripecoinpayments_tx_conversion_rate_tx_id, optional)
 
 }
 
@@ -24496,14 +24612,14 @@ func (rx *Rx) Get_OauthClient_By_Id(ctx context.Context,
 	return tx.Get_OauthClient_By_Id(ctx, oauth_client_id)
 }
 
-func (rx *Rx) Get_OauthCode_By_Code(ctx context.Context,
+func (rx *Rx) Get_OauthCode_By_Code_And_ClaimedAt_Is_Null(ctx context.Context,
 	oauth_code_code OauthCode_Code_Field) (
 	oauth_code *OauthCode, err error) {
 	var tx *Tx
 	if tx, err = rx.getTx(ctx); err != nil {
 		return
 	}
-	return tx.Get_OauthCode_By_Code(ctx, oauth_code_code)
+	return tx.Get_OauthCode_By_Code_And_ClaimedAt_Is_Null(ctx, oauth_code_code)
 }
 
 func (rx *Rx) Get_OauthToken_By_Kind_And_Token(ctx context.Context,
@@ -24718,6 +24834,16 @@ func (rx *Rx) Get_User_By_NormalizedEmail_And_Status_Not_Number(ctx context.Cont
 		return
 	}
 	return tx.Get_User_By_NormalizedEmail_And_Status_Not_Number(ctx, user_normalized_email)
+}
+
+func (rx *Rx) Get_User_PaidTier_By_Id(ctx context.Context,
+	user_id User_Id_Field) (
+	row *PaidTier_Row, err error) {
+	var tx *Tx
+	if tx, err = rx.getTx(ctx); err != nil {
+		return
+	}
+	return tx.Get_User_PaidTier_By_Id(ctx, user_id)
 }
 
 func (rx *Rx) Get_User_ProjectLimit_By_Id(ctx context.Context,
@@ -25365,11 +25491,10 @@ type Methods interface {
 		coinpayments_transaction_id CoinpaymentsTransaction_Id_Field,
 		coinpayments_transaction_user_id CoinpaymentsTransaction_UserId_Field,
 		coinpayments_transaction_address CoinpaymentsTransaction_Address_Field,
-		coinpayments_transaction_amount CoinpaymentsTransaction_Amount_Field,
-		coinpayments_transaction_received CoinpaymentsTransaction_Received_Field,
 		coinpayments_transaction_status CoinpaymentsTransaction_Status_Field,
 		coinpayments_transaction_key CoinpaymentsTransaction_Key_Field,
-		coinpayments_transaction_timeout CoinpaymentsTransaction_Timeout_Field) (
+		coinpayments_transaction_timeout CoinpaymentsTransaction_Timeout_Field,
+		optional CoinpaymentsTransaction_Create_Fields) (
 		coinpayments_transaction *CoinpaymentsTransaction, err error)
 
 	Create_Coupon(ctx context.Context,
@@ -25488,7 +25613,7 @@ type Methods interface {
 
 	Create_StripecoinpaymentsTxConversionRate(ctx context.Context,
 		stripecoinpayments_tx_conversion_rate_tx_id StripecoinpaymentsTxConversionRate_TxId_Field,
-		stripecoinpayments_tx_conversion_rate_rate StripecoinpaymentsTxConversionRate_Rate_Field) (
+		optional StripecoinpaymentsTxConversionRate_Create_Fields) (
 		stripecoinpayments_tx_conversion_rate *StripecoinpaymentsTxConversionRate, err error)
 
 	Create_User(ctx context.Context,
@@ -25632,7 +25757,7 @@ type Methods interface {
 		oauth_client_id OauthClient_Id_Field) (
 		oauth_client *OauthClient, err error)
 
-	Get_OauthCode_By_Code(ctx context.Context,
+	Get_OauthCode_By_Code_And_ClaimedAt_Is_Null(ctx context.Context,
 		oauth_code_code OauthCode_Code_Field) (
 		oauth_code *OauthCode, err error)
 
@@ -25723,6 +25848,10 @@ type Methods interface {
 	Get_User_By_NormalizedEmail_And_Status_Not_Number(ctx context.Context,
 		user_normalized_email User_NormalizedEmail_Field) (
 		user *User, err error)
+
+	Get_User_PaidTier_By_Id(ctx context.Context,
+		user_id User_Id_Field) (
+		row *PaidTier_Row, err error)
 
 	Get_User_ProjectLimit_By_Id(ctx context.Context,
 		user_id User_Id_Field) (

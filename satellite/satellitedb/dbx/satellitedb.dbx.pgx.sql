@@ -56,8 +56,10 @@ CREATE TABLE coinpayments_transactions (
 	id text NOT NULL,
 	user_id bytea NOT NULL,
 	address text NOT NULL,
-	amount bytea NOT NULL,
-	received bytea NOT NULL,
+	amount_gob bytea,
+	amount_numeric bigint,
+	received_gob bytea,
+	received_numeric bigint,
 	status integer NOT NULL,
 	key text NOT NULL,
 	timeout integer NOT NULL,
@@ -146,7 +148,6 @@ CREATE TABLE nodes (
 	last_contact_failure timestamp with time zone NOT NULL DEFAULT 'epoch',
 	disqualified timestamp with time zone,
 	disqualification_reason integer,
-	suspended timestamp with time zone,
 	unknown_audit_suspended timestamp with time zone,
 	offline_suspended timestamp with time zone,
 	under_review timestamp with time zone,
@@ -272,7 +273,6 @@ CREATE TABLE reputations (
 	created_at timestamp with time zone NOT NULL DEFAULT current_timestamp,
 	updated_at timestamp with time zone NOT NULL DEFAULT current_timestamp,
 	disqualified timestamp with time zone,
-	suspended timestamp with time zone,
 	unknown_audit_suspended timestamp with time zone,
 	offline_suspended timestamp with time zone,
 	under_review timestamp with time zone,
@@ -398,7 +398,8 @@ CREATE TABLE stripecoinpayments_invoice_project_records (
 );
 CREATE TABLE stripecoinpayments_tx_conversion_rates (
 	tx_id text NOT NULL,
-	rate bytea NOT NULL,
+	rate_gob bytea,
+	rate_numeric double precision,
 	created_at timestamp with time zone NOT NULL,
 	PRIMARY KEY ( tx_id )
 );
