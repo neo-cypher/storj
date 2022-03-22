@@ -70,6 +70,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dvyukov/go-fuzz v0.0.0-20220220162807-a217d9bdbece // indirect
+	github.com/dvyukov/go-fuzz-corpus v0.0.0-20190920191254-c42c1b2914c7 // indirect
 	github.com/elazarl/go-bindata-assetfs v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/go-task/slim-sprig v0.0.0-20210107165309-348f09dbbbc0 // indirect

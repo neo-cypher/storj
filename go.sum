@@ -98,6 +98,8 @@ github.com/dgryski/go-sip13 v0.0.0-20181026042036-e10d5fee7954/go.mod h1:vAd38F8
 github.com/dustin/go-humanize v1.0.0/go.mod h1:HtrtbFcZ19U5GC7JDqmcUSB87Iq5E25KnS6fMYU6eOk=
 github.com/dvyukov/go-fuzz v0.0.0-20220220162807-a217d9bdbece h1:6BGhEtGBmkgr8TKLjMBBMpvM/fK0GHj4prrkK1tYPcA=
 github.com/dvyukov/go-fuzz v0.0.0-20220220162807-a217d9bdbece/go.mod h1:11Gm+ccJnvAhCNLlf5+cS9KjtbaD5I5zaZpFMsTHWTw=
+github.com/dvyukov/go-fuzz-corpus v0.0.0-20190920191254-c42c1b2914c7 h1:dECcCtiFwubOBYviX4zj9ggx9ucw2lLEGlU3O+Q7tuk=
+github.com/dvyukov/go-fuzz-corpus v0.0.0-20190920191254-c42c1b2914c7/go.mod h1:aSQy4yPbyjNrXv8ANgj9BQacfss3bbmXTon1mFcwc1k=
 github.com/elazarl/go-bindata-assetfs v1.0.1 h1:m0kkaHRKEu7tUIUFVwhGGGYClXvyl4RE03qmvRTNfbw=
 github.com/elazarl/go-bindata-assetfs v1.0.1/go.mod h1:v+YaWX3bdea5J/mo8dSETolEo7R71Vk1u8bnjau5yw4=
 github.com/envoyproxy/go-control-plane v0.9.1-0.20191026205805-5f8ba28d4473/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
