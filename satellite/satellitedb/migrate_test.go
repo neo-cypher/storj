@@ -284,6 +284,27 @@ func migrateTest(t *testing.T, connStr string) {
 		finalSchema = currentSchema
 	}
 
+	// TODO(yar): remove this exception on adding migration to remove `suspended` column
+	nodes, ok := finalSchema.FindTable("nodes")
+	if ok {
+		nodes.RemoveColumn("suspended")
+	}
+	reputations, ok := finalSchema.FindTable("reputations")
+	if ok {
+		reputations.RemoveColumn("suspended")
+	}
+
+	// TODO(thepaul): remove these exceptions on adding migration to remove _gob columns
+	coinpaymentsTransactions, ok := finalSchema.FindTable("coinpayments_transactions")
+	if ok {
+		coinpaymentsTransactions.RemoveColumn("amount_gob")
+		coinpaymentsTransactions.RemoveColumn("received_gob")
+	}
+	conversionRates, ok := finalSchema.FindTable("stripecoinpayments_tx_conversion_rates")
+	if ok {
+		conversionRates.RemoveColumn("rate_gob")
+	}
+
 	// verify that we also match the dbx version
 	require.Equal(t, dbxschema, finalSchema, "result of all migration scripts did not match dbx schema")
 }

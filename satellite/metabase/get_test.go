@@ -333,7 +333,7 @@ func TestGetSegmentByPosition(t *testing.T) {
 				ObjectStream:                 obj.ObjectStream,
 				NewSegmentKeys:               newEncryptedKeyNonces,
 				NewEncryptedObjectKey:        copyObjStream.ObjectKey,
-				NewEncryptedMetadataKeyNonce: newEncryptedMetadataKeyNonce.Bytes(),
+				NewEncryptedMetadataKeyNonce: newEncryptedMetadataKeyNonce,
 				NewEncryptedMetadataKey:      newEncryptedMetadataKey,
 			})
 			require.NoError(t, err)
@@ -519,7 +519,7 @@ func TestGetSegmentByPosition(t *testing.T) {
 				NewBucket:                    copyObjStream.BucketName,
 				NewSegmentKeys:               newEncryptedKeyNonces,
 				NewEncryptedObjectKey:        copyObjStream.ObjectKey,
-				NewEncryptedMetadataKeyNonce: newEncryptedMetadataKeyNonce.Bytes(),
+				NewEncryptedMetadataKeyNonce: newEncryptedMetadataKeyNonce,
 				NewEncryptedMetadataKey:      newEncryptedMetadataKey,
 			})
 			require.NoError(t, err)
@@ -605,11 +605,7 @@ func TestGetSegmentByPosition(t *testing.T) {
 					metabase.RawSegment(expectedSegment),
 					metabase.RawSegment(expectedCopiedSegmentRaw),
 				},
-				Copies: []metabase.RawCopy{
-					{
-						StreamID:         copyObjStream.StreamID,
-						AncestorStreamID: objStream.StreamID,
-					}},
+				Copies: nil,
 			}.Check(ctx, t, db)
 		})
 
@@ -690,7 +686,7 @@ func TestGetSegmentByPosition(t *testing.T) {
 				NewBucket:                    copyObjStream.BucketName,
 				NewSegmentKeys:               newEncryptedKeyNonces,
 				NewEncryptedObjectKey:        copyObjStream.ObjectKey,
-				NewEncryptedMetadataKeyNonce: newEncryptedMetadataKeyNonce.Bytes(),
+				NewEncryptedMetadataKeyNonce: newEncryptedMetadataKeyNonce,
 				NewEncryptedMetadataKey:      newEncryptedMetadataKey,
 			})
 			require.NoError(t, err)
@@ -785,11 +781,7 @@ func TestGetSegmentByPosition(t *testing.T) {
 					metabase.RawSegment(expectedSegment),
 					metabase.RawSegment(expectedCopiedSegmentRaw),
 				},
-				Copies: []metabase.RawCopy{
-					{
-						StreamID:         copyObjStream.StreamID,
-						AncestorStreamID: objStream.StreamID,
-					}},
+				Copies: nil,
 			}.Check(ctx, t, db)
 		})
 	})
@@ -1014,7 +1006,7 @@ func TestGetLatestObjectLastSegment(t *testing.T) {
 				NewBucket:                    copyObjStream.BucketName,
 				NewSegmentKeys:               newEncryptedKeyNonces,
 				NewEncryptedObjectKey:        copyObjStream.ObjectKey,
-				NewEncryptedMetadataKeyNonce: newEncryptedMetadataKeyNonce.Bytes(),
+				NewEncryptedMetadataKeyNonce: newEncryptedMetadataKeyNonce,
 				NewEncryptedMetadataKey:      newEncryptedMetadataKey,
 			})
 			require.NoError(t, err)
@@ -1095,11 +1087,7 @@ func TestGetLatestObjectLastSegment(t *testing.T) {
 					metabase.RawSegment(expectedSegment),
 					metabase.RawSegment(expectedCopiedSegmentRaw),
 				},
-				Copies: []metabase.RawCopy{
-					{
-						StreamID:         copyObjStream.StreamID,
-						AncestorStreamID: objStream.StreamID,
-					}},
+				Copies: nil,
 			}.Check(ctx, t, db)
 		})
 
@@ -1182,7 +1170,7 @@ func TestGetLatestObjectLastSegment(t *testing.T) {
 				NewBucket:                    copyObjStream.BucketName,
 				NewSegmentKeys:               newEncryptedKeyNonces,
 				NewEncryptedObjectKey:        copyObjStream.ObjectKey,
-				NewEncryptedMetadataKeyNonce: newEncryptedMetadataKeyNonce.Bytes(),
+				NewEncryptedMetadataKeyNonce: newEncryptedMetadataKeyNonce,
 				NewEncryptedMetadataKey:      newEncryptedMetadataKey,
 			})
 			require.NoError(t, err)
@@ -1271,158 +1259,7 @@ func TestGetLatestObjectLastSegment(t *testing.T) {
 					metabase.RawSegment(expectedSegment),
 					metabase.RawSegment(expectedCopiedSegmentRaw),
 				},
-				Copies: []metabase.RawCopy{
-					{
-						StreamID:         copyObjStream.StreamID,
-						AncestorStreamID: objStream.StreamID,
-					}},
-			}.Check(ctx, t, db)
-		})
-	})
-}
-
-func TestGetSegmentByOffset(t *testing.T) {
-	metabasetest.Run(t, func(ctx *testcontext.Context, t *testing.T, db *metabase.DB) {
-		obj := metabasetest.RandObjectStream()
-		location := obj.Location()
-		now := time.Now()
-
-		for _, test := range metabasetest.InvalidObjectLocations(location) {
-			test := test
-			t.Run(test.Name, func(t *testing.T) {
-				defer metabasetest.DeleteAll{}.Check(ctx, t, db)
-				metabasetest.GetSegmentByOffset{
-					Opts: metabase.GetSegmentByOffset{
-						ObjectLocation: test.ObjectLocation,
-					},
-					ErrClass: test.ErrClass,
-					ErrText:  test.ErrText,
-				}.Check(ctx, t, db)
-
-				metabasetest.Verify{}.Check(ctx, t, db)
-			})
-		}
-
-		t.Run("Invalid PlainOffset", func(t *testing.T) {
-			defer metabasetest.DeleteAll{}.Check(ctx, t, db)
-
-			metabasetest.GetSegmentByOffset{
-				Opts: metabase.GetSegmentByOffset{
-					ObjectLocation: location,
-					PlainOffset:    -1,
-				},
-				ErrClass: &metabase.ErrInvalidRequest,
-				ErrText:  "Invalid PlainOffset: -1",
-			}.Check(ctx, t, db)
-
-			metabasetest.Verify{}.Check(ctx, t, db)
-		})
-
-		t.Run("Object or segment missing", func(t *testing.T) {
-			defer metabasetest.DeleteAll{}.Check(ctx, t, db)
-
-			metabasetest.GetSegmentByOffset{
-				Opts: metabase.GetSegmentByOffset{
-					ObjectLocation: location,
-				},
-				ErrClass: &storj.ErrObjectNotFound,
-				ErrText:  "metabase: object or segment missing",
-			}.Check(ctx, t, db)
-
-			metabasetest.Verify{}.Check(ctx, t, db)
-		})
-
-		t.Run("Get segment", func(t *testing.T) {
-			defer metabasetest.DeleteAll{}.Check(ctx, t, db)
-
-			metabasetest.CreateTestObject{}.Run(ctx, t, db, obj, 4)
-
-			segments := make([]metabase.Segment, 4)
-			for i := range segments {
-				segments[i] = metabase.Segment{
-					StreamID: obj.StreamID,
-					Position: metabase.SegmentPosition{
-						Index: uint32(i),
-					},
-					CreatedAt:         now,
-					RootPieceID:       storj.PieceID{1},
-					EncryptedKey:      []byte{3},
-					EncryptedKeyNonce: []byte{4},
-					EncryptedETag:     []byte{5},
-					EncryptedSize:     1060,
-					PlainSize:         512,
-					PlainOffset:       int64(i * 512),
-					Pieces:            metabase.Pieces{{Number: 0, StorageNode: storj.NodeID{2}}},
-					Redundancy:        metabasetest.DefaultRedundancy,
-				}
-			}
-
-			var testCases = []struct {
-				Offset          int64
-				ExpectedSegment metabase.Segment
-			}{
-				{0, segments[0]},
-				{100, segments[0]},
-				{1023, segments[1]},
-				{1024, segments[2]},
-			}
-
-			for _, tc := range testCases {
-				metabasetest.GetSegmentByOffset{
-					Opts: metabase.GetSegmentByOffset{
-						ObjectLocation: location,
-						PlainOffset:    tc.Offset,
-					},
-					Result: tc.ExpectedSegment,
-				}.Check(ctx, t, db)
-			}
-
-			objExp := metabasetest.CreateExpiredObject(ctx, t, db, metabasetest.RandObjectStream(), 1, now.Add(8*time.Hour))
-			segmentExpiresAt := metabase.Segment(metabasetest.DefaultRawSegment(objExp.ObjectStream, metabase.SegmentPosition{
-				Index: 0,
-			}))
-			segmentExpiresAt.ExpiresAt = objExp.ExpiresAt
-
-			metabasetest.GetSegmentByOffset{
-				Opts: metabase.GetSegmentByOffset{
-					ObjectLocation: objExp.Location(),
-					PlainOffset:    0,
-				},
-				Result: segmentExpiresAt,
-			}.Check(ctx, t, db)
-
-			metabasetest.GetSegmentByOffset{
-				Opts: metabase.GetSegmentByOffset{
-					ObjectLocation: location,
-					PlainOffset:    2048,
-				},
-				ErrClass: &storj.ErrObjectNotFound,
-				ErrText:  "metabase: object or segment missing",
-			}.Check(ctx, t, db)
-
-			metabasetest.Verify{
-				Objects: []metabase.RawObject{
-					{
-						ObjectStream: obj,
-						CreatedAt:    now,
-						Status:       metabase.Committed,
-						SegmentCount: 4,
-
-						TotalPlainSize:     2048,
-						TotalEncryptedSize: 4240,
-						FixedSegmentSize:   512,
-
-						Encryption: metabasetest.DefaultEncryption,
-					},
-					metabase.RawObject(objExp),
-				},
-				Segments: []metabase.RawSegment{
-					metabase.RawSegment(segments[0]),
-					metabase.RawSegment(segments[1]),
-					metabase.RawSegment(segments[2]),
-					metabase.RawSegment(segments[3]),
-					metabase.RawSegment(segmentExpiresAt),
-				},
+				Copies: nil,
 			}.Check(ctx, t, db)
 		})
 	})

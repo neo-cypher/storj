@@ -1842,11 +1842,12 @@ func (db *satelliteDB) PostgresMigration() *migrate.Migration {
 			},
 			{
 				DB:          &db.migrationDB,
-				Description: "drop suspended column on reputations and nodes",
+				Description: "make _numeric fields not null (all are now populated)",
 				Version:     191,
 				Action: migrate.SQL{
-					`ALTER TABLE reputations DROP COLUMN suspended;`,
-					`ALTER TABLE nodes DROP COLUMN suspended;`,
+					`ALTER TABLE coinpayments_transactions ALTER COLUMN amount_numeric SET NOT NULL;`,
+					`ALTER TABLE coinpayments_transactions ALTER COLUMN received_numeric SET NOT NULL;`,
+					`ALTER TABLE stripecoinpayments_tx_conversion_rates ALTER COLUMN rate_numeric SET NOT NULL;`,
 				},
 			},
 			// NB: after updating testdata in `testdata`, run
