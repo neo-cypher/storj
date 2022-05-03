@@ -25,8 +25,8 @@ type Info struct {
 	CreatedAt  time.Time
 }
 
-// CSVRow represents data from QueryAttribution without exposing dbx.
-type CSVRow struct {
+// BucketUsage is the usage data for a single bucket.
+type BucketUsage struct {
 	PartnerID    []byte
 	UserAgent    []byte
 	ProjectID    []byte
@@ -47,7 +47,7 @@ type DB interface {
 	// Insert creates and stores new Info.
 	Insert(ctx context.Context, info *Info) (*Info, error)
 	// QueryAttribution queries partner bucket attribution data.
-	QueryAttribution(ctx context.Context, partnerID uuid.UUID, userAgent []byte, start time.Time, end time.Time) ([]*CSVRow, error)
-	// QueryAllAttribution queries all partner bucket attribution data.
-	QueryAllAttribution(ctx context.Context, start time.Time, end time.Time) ([]*CSVRow, error)
+	QueryAttribution(ctx context.Context, partnerID uuid.UUID, userAgent []byte, start time.Time, end time.Time) ([]*BucketUsage, error)
+	// QueryAllAttribution queries all partner bucket usage data.
+	QueryAllAttribution(ctx context.Context, start time.Time, end time.Time) ([]*BucketUsage, error)
 }

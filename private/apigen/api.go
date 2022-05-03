@@ -113,7 +113,12 @@ func (a *API) generateGo() ([]byte, error) {
 		}
 		p(")")
 		p("")
+	}
 
+	p("const dateLayout = \"2006-01-02T15:04:05.000Z\"")
+	p("")
+
+	for _, group := range a.EndpointGroups {
 		p("var Err%sAPI = errs.Class(\"%s %s api\")", cases.Title(language.Und).String(group.Prefix), a.PackageName, group.Prefix)
 		p("")
 
@@ -199,13 +204,11 @@ func (a *API) generateGo() ([]byte, error) {
 						p("")
 						continue
 					case reflect.TypeOf(time.Time{}):
-						p("%sStamp, err := strconv.ParseInt(r.URL.Query().Get(\"%s\"), 10, 64)", param.Name, param.Name)
+						p("%s, err := time.Parse(dateLayout, r.URL.Query().Get(\"%s\"))", param.Name, param.Name)
 						p("if err != nil {")
 						p("api.ServeError(h.log, w, http.StatusBadRequest, err)")
 						p("return")
 						p("}")
-						p("")
-						p("%s := time.Unix(%sStamp, 0).UTC()", param.Name, param.Name)
 						p("")
 						continue
 					case reflect.TypeOf(""):
@@ -218,7 +221,32 @@ func (a *API) generateGo() ([]byte, error) {
 						continue
 					}
 				}
-			case http.MethodPut:
+			case http.MethodPatch:
+				for _, param := range endpoint.Params {
+					if param.Type == reflect.TypeOf(uuid.UUID{}) {
+						p("%sParam, ok := mux.Vars(r)[\"%s\"]", param.Name, param.Name)
+						p("if !ok {")
+						p("api.ServeError(h.log, w, http.StatusBadRequest, errs.New(\"missing %s route param\"))", param.Name)
+						p("return")
+						p("}")
+						p("")
+
+						p("%s, err := uuid.FromString(%sParam)", param.Name, param.Name)
+						p("if err != nil {")
+						p("api.ServeError(h.log, w, http.StatusBadRequest, err)")
+						p("return")
+						p("}")
+						p("")
+					} else {
+						p("%s := &%s{}", param.Name, param.Type)
+						p("if err = json.NewDecoder(r.Body).Decode(&%s); err != nil {", param.Name)
+						p("api.ServeError(h.log, w, http.StatusBadRequest, err)")
+						p("return")
+						p("}")
+						p("")
+					}
+				}
+			case http.MethodPost:
 				for _, param := range endpoint.Params {
 					p("%s := &%s{}", param.Name, param.Type)
 					p("if err = json.NewDecoder(r.Body).Decode(&%s); err != nil {", param.Name)
@@ -235,7 +263,15 @@ func (a *API) generateGo() ([]byte, error) {
 				for _, methodParam := range endpoint.Params {
 					methodFormat += methodParam.Name + ", "
 				}
-			case http.MethodPut:
+			case http.MethodPatch:
+				for _, methodParam := range endpoint.Params {
+					if methodParam.Type == reflect.TypeOf(uuid.UUID{}) {
+						methodFormat += methodParam.Name + ", "
+					} else {
+						methodFormat += "*" + methodParam.Name + ", "
+					}
+				}
+			case http.MethodPost:
 				for _, methodParam := range endpoint.Params {
 					methodFormat += "*" + methodParam.Name + ", "
 				}
