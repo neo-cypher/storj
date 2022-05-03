@@ -23,7 +23,7 @@ require (
 	github.com/jtolds/monkit-hw/v2 v2.0.0-20191108235325-141a0da276b3
 	github.com/loov/hrtime v1.0.3
 	github.com/mattn/go-sqlite3 v1.14.12
-	github.com/nsf/jsondiff v0.0.0-20200515183724-f29ed568f4ce
+	github.com/nsf/jsondiff v0.0.0-20210926074059-1e845ec5d249
 	github.com/nsf/termbox-go v0.0.0-20200418040025-38ba6e5628f1
 	github.com/oschwald/maxminddb-golang v1.8.0
 	github.com/pquerna/otp v1.3.0
