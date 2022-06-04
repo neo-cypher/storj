@@ -17,7 +17,7 @@ require (
 	github.com/gorilla/schema v1.2.0
 	github.com/graphql-go/graphql v0.7.9
 	github.com/jackc/pgconn v1.11.0
-	github.com/jackc/pgerrcode v0.0.0-20201024163028-a0d42d470451
+	github.com/jackc/pgerrcode v0.0.0-20220416144525-469b46aa5efa
 	github.com/jackc/pgtype v1.10.0
 	github.com/jackc/pgx/v4 v4.15.0
 	github.com/jtolds/monkit-hw/v2 v2.0.0-20191108235325-141a0da276b3
