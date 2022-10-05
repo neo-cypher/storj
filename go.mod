@@ -48,7 +48,7 @@ require (
 	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
 	golang.org/x/text v0.3.7
-	golang.org/x/time v0.0.0-20200630173020-3af7569d3a1e
+	golang.org/x/time v0.0.0-20220922220347-f3bd1da661af
 	gopkg.in/segmentio/analytics-go.v3 v3.1.0
 	gopkg.in/yaml.v3 v3.0.0-20200615113413-eeeca48fe776
 	storj.io/common v0.0.0-20220912074536-0fff01212055
