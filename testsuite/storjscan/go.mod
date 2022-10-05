@@ -9,7 +9,7 @@ require (
 	github.com/stretchr/testify v1.8.0
 	github.com/zeebo/errs v1.3.0
 	go.uber.org/zap v1.21.0
-	golang.org/x/sync v0.0.0-20220601150217-0de741cfad7f
+	golang.org/x/sync v0.0.0-20220929204114-8fcdb60fdcc0
 	storj.io/common v0.0.0-20220912074536-0fff01212055
 	storj.io/private v0.0.0-20220915132359-957cab776577
 	storj.io/storj v1.63.1
