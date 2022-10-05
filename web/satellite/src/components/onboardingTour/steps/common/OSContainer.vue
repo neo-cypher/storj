@@ -37,8 +37,9 @@
 
 <script lang="ts">
 import { Component, Prop, Vue } from 'vue-property-decorator';
-import { OnboardingOS } from "@/types/common";
-import { APP_STATE_MUTATIONS } from "@/store/mutationConstants";
+
+import { OnboardingOS } from '@/types/common';
+import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
 
 // @vue/component
 @Component
@@ -56,20 +57,20 @@ export default class OSContainer extends Vue {
      */
     public mounted(): void {
         if (this.storedOsSelected) {
-            this.setTab(this.storedOsSelected)
+            this.setTab(this.storedOsSelected);
 
             return;
         }
 
         switch (true) {
-        case navigator.appVersion.indexOf("Mac") !== -1:
-            this.setTab(OnboardingOS.MAC)
+        case navigator.appVersion.indexOf('Mac') !== -1:
+            this.setTab(OnboardingOS.MAC);
             return;
-        case navigator.appVersion.indexOf("Linux") !== -1:
-            this.setTab(OnboardingOS.LINUX)
+        case navigator.appVersion.indexOf('Linux') !== -1:
+            this.setTab(OnboardingOS.LINUX);
             return;
         default:
-            this.setTab(OnboardingOS.WINDOWS)
+            this.setTab(OnboardingOS.WINDOWS);
         }
     }
 
@@ -78,7 +79,7 @@ export default class OSContainer extends Vue {
      */
     public setTab(os: OnboardingOS): void {
         this.osSelected = os;
-        this.$store.commit(APP_STATE_MUTATIONS.SET_ONB_OS, os)
+        this.$store.commit(APP_STATE_MUTATIONS.SET_ONB_OS, os);
     }
 
     /**
@@ -114,15 +115,16 @@ export default class OSContainer extends Vue {
 <style scoped lang="scss">
     .os {
         font-family: 'font_regular', sans-serif;
-        margin: 20px 0;
+        margin-top: 20px;
+        width: 100%;
 
         &__tabs {
             display: inline-flex;
             align-items: center;
             border-radius: 0 6px 6px 0;
-            border-top: 1px solid rgb(230, 236, 241);
-            border-left: 1px solid rgb(230, 236, 241);
-            border-right: 1px solid rgb(230, 236, 241);
+            border-top: 1px solid rgb(230 236 241);
+            border-left: 1px solid rgb(230 236 241);
+            border-right: 1px solid rgb(230 236 241);
             margin-bottom: -1px;
 
             &__choice {
@@ -134,17 +136,17 @@ export default class OSContainer extends Vue {
             }
 
             &__choice:first-child {
-                border-right: 1px solid rgb(230, 236, 241);
+                border-right: 1px solid rgb(230 236 241);
             }
 
             &__choice:last-child {
-                border-left: 1px solid rgb(230, 236, 241);
+                border-left: 1px solid rgb(230 236 241);
             }
         }
     }
 
     .active {
-        background: rgb(24, 48, 85);
+        background: rgb(24 48 85);
         color: #e6ecf1;
     }
 

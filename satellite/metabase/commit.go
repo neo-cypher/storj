@@ -64,11 +64,11 @@ func (opts *BeginObjectNextVersion) Verify() error {
 }
 
 // BeginObjectNextVersion adds a pending object to the database, with automatically assigned version.
-func (db *DB) BeginObjectNextVersion(ctx context.Context, opts BeginObjectNextVersion) (committed Version, err error) {
+func (db *DB) BeginObjectNextVersion(ctx context.Context, opts BeginObjectNextVersion) (object Object, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	if err := opts.Verify(); err != nil {
-		return -1, err
+		return Object{}, err
 	}
 
 	if opts.ZombieDeletionDeadline == nil {
@@ -76,7 +76,19 @@ func (db *DB) BeginObjectNextVersion(ctx context.Context, opts BeginObjectNextVe
 		opts.ZombieDeletionDeadline = &deadline
 	}
 
-	row := db.db.QueryRowContext(ctx, `
+	object = Object{
+		ObjectStream: ObjectStream{
+			ProjectID:  opts.ProjectID,
+			BucketName: opts.BucketName,
+			ObjectKey:  opts.ObjectKey,
+			StreamID:   opts.StreamID,
+		},
+		ExpiresAt:              opts.ExpiresAt,
+		Encryption:             opts.Encryption,
+		ZombieDeletionDeadline: opts.ZombieDeletionDeadline,
+	}
+
+	if err := db.db.QueryRowContext(ctx, `
 		INSERT INTO objects (
 			project_id, bucket_name, object_key, version, stream_id,
 			expires_at, encryption,
@@ -94,21 +106,18 @@ func (db *DB) BeginObjectNextVersion(ctx context.Context, opts BeginObjectNextVe
 			$4, $5, $6,
 			$7,
 			$8, $9, $10)
-		RETURNING version
+		RETURNING status, version, created_at
 	`, opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, opts.StreamID,
 		opts.ExpiresAt, encryptionParameters{&opts.Encryption},
 		opts.ZombieDeletionDeadline,
 		opts.EncryptedMetadata, opts.EncryptedMetadataNonce, opts.EncryptedMetadataEncryptedKey,
-	)
-
-	var v int64
-	if err := row.Scan(&v); err != nil {
-		return -1, Error.New("unable to insert object: %w", err)
+	).Scan(&object.Status, &object.Version, &object.CreatedAt); err != nil {
+		return Object{}, Error.New("unable to insert object: %w", err)
 	}
 
 	mon.Meter("object_begin").Mark(1)
 
-	return Version(v), nil
+	return object, nil
 }
 
 // BeginObjectExactVersion contains arguments necessary for starting an object upload.
@@ -247,7 +256,7 @@ func (db *DB) BeginSegment(ctx context.Context, opts BeginSegment) (err error) {
 		opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, opts.Version, opts.StreamID).Scan(&value)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return Error.New("pending object missing")
+			return ErrPendingObjectMissing.New("")
 		}
 		return Error.New("unable to query object status: %w", err)
 	}
@@ -315,7 +324,7 @@ func (db *DB) CommitSegment(ctx context.Context, opts CommitSegment) (err error)
 		return ErrInvalidRequest.New("number of pieces is less than redundancy optimal shares value")
 	}
 
-	aliasPieces, err := db.aliasCache.ConvertPiecesToAliases(ctx, opts.Pieces)
+	aliasPieces, err := db.aliasCache.EnsurePiecesToAliases(ctx, opts.Pieces)
 	if err != nil {
 		return Error.New("unable to convert pieces to aliases: %w", err)
 	}
@@ -363,7 +372,7 @@ func (db *DB) CommitSegment(ctx context.Context, opts CommitSegment) (err error)
 	)
 	if err != nil {
 		if code := pgerrcode.FromError(err); code == pgxerrcode.NotNullViolation {
-			return Error.New("pending object missing")
+			return ErrPendingObjectMissing.New("")
 		}
 		return Error.New("unable to insert segment: %w", err)
 	}
@@ -449,7 +458,7 @@ func (db *DB) CommitInlineSegment(ctx context.Context, opts CommitInlineSegment)
 	)
 	if err != nil {
 		if code := pgerrcode.FromError(err); code == pgxerrcode.NotNullViolation {
-			return Error.New("pending object missing")
+			return ErrPendingObjectMissing.New("")
 		}
 		return Error.New("unable to insert segment: %w", err)
 	}
@@ -500,6 +509,10 @@ func (c *CommitObject) Verify() error {
 func (db *DB) CommitObject(ctx context.Context, opts CommitObject) (object Object, err error) {
 	defer mon.Task()(&ctx)(&err)
 
+	if db.config.MultipleVersions {
+		return Object{}, Error.New("Unimplemented")
+	}
+
 	if err := opts.Verify(); err != nil {
 		return Object{}, err
 	}
@@ -542,12 +555,14 @@ func (db *DB) CommitObject(ctx context.Context, opts CommitObject) (object Objec
 			totalEncryptedSize += int64(seg.EncryptedSize)
 		}
 
-		args := []interface{}{opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, opts.Version, opts.StreamID,
+		args := []interface{}{
+			opts.ProjectID, []byte(opts.BucketName), opts.ObjectKey, opts.Version, opts.StreamID,
 			len(segments),
 			totalPlainSize,
 			totalEncryptedSize,
 			fixedSegmentSize,
-			encryptionParameters{&opts.Encryption}}
+			encryptionParameters{&opts.Encryption},
+		}
 
 		metadataColumns := ""
 		if opts.OverrideEncryptedMetadata {

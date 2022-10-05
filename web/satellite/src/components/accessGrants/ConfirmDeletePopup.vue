@@ -95,22 +95,22 @@
 
 <script lang="ts">
 import { Component, Vue } from 'vue-property-decorator';
+
 import { MetaUtils } from '@/utils/meta';
+import { ACCESS_GRANTS_ACTIONS } from '@/store/modules/accessGrants';
+import { AccessGrant } from '@/types/accessGrants';
 
 import VButton from '@/components/common/VButton.vue';
 
 import CloseCrossIcon from '@/../static/images/common/closeCross.svg';
 import TrashIcon from '@/../static/images/accessGrants/trashIcon.svg';
 
-import { ACCESS_GRANTS_ACTIONS } from '@/store/modules/accessGrants';
-import { AccessGrant } from '@/types/accessGrants';
-
 // @vue/component
 @Component({
     components: {
         VButton,
         CloseCrossIcon,
-        TrashIcon
+        TrashIcon,
     },
 })
 export default class ConfirmDeletePopup extends Vue {
@@ -155,7 +155,7 @@ export default class ConfirmDeletePopup extends Vue {
      */ 
     public get isNewAccessGrantFlow(): boolean {
         const isNewAccessGrantFlow = MetaUtils.getMetaContent('new-access-grant-flow');
-        return isNewAccessGrantFlow === "true";
+        return isNewAccessGrantFlow === 'true';
     }
     /**
      * Returns list of selected access grants from store.
@@ -174,7 +174,7 @@ export default class ConfirmDeletePopup extends Vue {
         right: 0;
         bottom: 0;
         z-index: 100;
-        background: rgba(27, 37, 51, 0.75);
+        background: rgb(27 37 51 / 75%);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -249,7 +249,7 @@ export default class ConfirmDeletePopup extends Vue {
                         padding: 25px;
                         width: calc(100% - 50px);
                         max-width: calc(100% - 50px);
-                        background: rgba(245, 246, 250, 0.6);
+                        background: rgb(245 246 250 / 60%);
 
                         &__name {
                             font-family: 'font_medium', sans-serif;

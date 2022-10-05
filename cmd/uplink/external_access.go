@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -63,7 +62,7 @@ func parseAccessDataOrPossiblyFile(accessDataOrFile string) (*uplink.Access, err
 		return access, nil
 	}
 
-	accessData, readErr := ioutil.ReadFile(accessDataOrFile)
+	accessData, readErr := os.ReadFile(accessDataOrFile)
 	if readErr != nil {
 		var pathErr *os.PathError
 		if errors.As(readErr, &pathErr) {
@@ -164,7 +163,7 @@ func (ex *external) RequestAccess(ctx context.Context, satelliteAddr, apiKey, pa
 	return access, nil
 }
 
-func (ex *external) ExportAccess(ctx clingy.Context, access *uplink.Access, filename string) error {
+func (ex *external) ExportAccess(ctx context.Context, access *uplink.Access, filename string) error {
 	serialized, err := access.Serialize()
 	if err != nil {
 		return errs.Wrap(err)
@@ -192,6 +191,6 @@ func (ex *external) ExportAccess(ctx clingy.Context, access *uplink.Access, file
 		return errs.Wrap(err)
 	}
 
-	fmt.Fprintln(ctx, "Exported access to:", filename)
+	fmt.Fprintln(clingy.Stdout(ctx), "Exported access to:", filename)
 	return nil
 }
