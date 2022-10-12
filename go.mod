@@ -41,7 +41,7 @@ require (
 	github.com/zeebo/ini v0.0.0-20210331155437-86af75b4f524
 	go.etcd.io/bbolt v1.3.5
 	go.uber.org/zap v1.16.0
-	golang.org/x/crypto v0.0.0-20220525230936-793ad666bf5e
+	golang.org/x/crypto v0.0.0-20221012134737-56aed061732a
 	golang.org/x/net v0.0.0-20220624214902-1bab6f366d9e
 	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
