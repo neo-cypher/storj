@@ -47,7 +47,7 @@
   "devDependencies": {
     "@types/chart.js": "2.9.36",
     "@types/filesystem": "0.0.32",
-    "@types/jest": "27.5.0",
+    "@types/jest": "27.5.2",
     "@types/node": "13.11.1",
     "@types/pbkdf2": "3.1.0",
     "@types/qrcode": "1.4.2",

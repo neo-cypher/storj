@@ -22,7 +22,7 @@
     "vuex": "3.6.2"
   },
   "devDependencies": {
-    "@types/jest": "27.5.0",
+    "@types/jest": "27.5.2",
     "@typescript-eslint/eslint-plugin": "5.22.0",
     "@typescript-eslint/parser": "5.22.0",
     "@vue/cli-plugin-babel": "5.0.4",
