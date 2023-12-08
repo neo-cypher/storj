@@ -9,10 +9,13 @@ export class LocalData {
     private static bucketWasCreated = 'bucketWasCreated';
     private static demoBucketCreated = 'demoBucketCreated';
     private static bucketGuideHidden = 'bucketGuideHidden';
+    private static fileGuideHidden = 'fileGuideHidden';
     private static serverSideEncryptionBannerHidden = 'serverSideEncryptionBannerHidden';
     private static serverSideEncryptionModalHidden = 'serverSideEncryptionModalHidden';
-    private static billingNotificationAcknowledged = 'billingNotificationAcknowledged';
     private static sessionExpirationDate = 'sessionExpirationDate';
+    private static projectLimitBannerHidden = 'projectLimitBannerHidden';
+    private static projectTableViewEnabled = 'projectTableViewEnabled';
+    private static browserCardViewEnabled = 'browserCardViewEnabled';
 
     public static getSelectedProjectId(): string | null {
         return localStorage.getItem(LocalData.selectedProjectId);
@@ -20,10 +23,6 @@ export class LocalData {
 
     public static setSelectedProjectId(id: string): void {
         localStorage.setItem(LocalData.selectedProjectId, id);
-    }
-
-    public static removeSelectedProjectId(): void {
-        localStorage.removeItem(LocalData.selectedProjectId);
     }
 
     public static getDemoBucketCreatedStatus(): string | null {
@@ -61,6 +60,20 @@ export class LocalData {
     }
 
     /**
+     * Hides the "click on the file name to preview" tooltip that appears on first upload.
+     */
+    public static setFileGuideHidden(): void {
+        localStorage.setItem(LocalData.fileGuideHidden, 'true');
+    }
+
+    /**
+     * Returns whether the "click on the file name to preview" tooltip that appears on first upload should be shown.
+     */
+    public static getFileGuideHidden(): boolean {
+        return localStorage.getItem(LocalData.fileGuideHidden) === 'true';
+    }
+
+    /**
      * "Disable" showing the server-side encryption banner on the bucket page
      */
     public static setServerSideEncryptionBannerHidden(value: boolean): void {
@@ -84,14 +97,6 @@ export class LocalData {
         return value === 'true';
     }
 
-    public static getBillingNotificationAcknowledged(): boolean {
-        return Boolean(localStorage.getItem(LocalData.billingNotificationAcknowledged));
-    }
-
-    public static setBillingNotificationAcknowledged(): void {
-        localStorage.setItem(LocalData.billingNotificationAcknowledged, 'true');
-    }
-
     public static getSessionExpirationDate(): Date | null {
         const data: string | null = localStorage.getItem(LocalData.sessionExpirationDate);
         if (data) {
@@ -103,5 +108,50 @@ export class LocalData {
 
     public static setSessionExpirationDate(date: Date): void {
         localStorage.setItem(LocalData.sessionExpirationDate, date.toISOString());
+    }
+
+    /**
+     * "Disable" showing the project limit banner.
+     */
+    public static setProjectLimitBannerHidden(): void {
+        localStorage.setItem(LocalData.projectLimitBannerHidden, 'true');
+    }
+
+    public static getProjectTableViewEnabled(): boolean {
+        const value = localStorage.getItem(LocalData.projectTableViewEnabled);
+        return value === 'true';
+    }
+
+    public static setProjectTableViewEnabled(enabled: boolean): void {
+        localStorage.setItem(LocalData.projectTableViewEnabled, enabled.toString());
+    }
+
+    /*
+    * Whether the file browser should use the card view.
+    */
+    public static getBrowserCardViewEnabled(): boolean {
+        const value = localStorage.getItem(LocalData.browserCardViewEnabled);
+        return value === 'true';
+    }
+
+    /*
+    * Set whether the file browser should use the card view.
+    */
+    public static setBrowserCardViewEnabled(enabled: boolean): void {
+        localStorage.setItem(LocalData.browserCardViewEnabled, enabled.toString());
+    }
+
+    /*
+    * Whether a user defined setting has been made for the projects table
+    * */
+    public static hasProjectTableViewConfigured(): boolean {
+        return localStorage.getItem(LocalData.projectTableViewEnabled) !== null;
+    }
+
+    /*
+    * Remove the user defined setting for the projects table;
+    * */
+    public static removeProjectTableViewConfig() {
+        return localStorage.removeItem(LocalData.projectTableViewEnabled);
     }
 }

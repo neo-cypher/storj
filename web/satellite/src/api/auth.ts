@@ -4,9 +4,19 @@
 import { ErrorBadRequest } from '@/api/errors/ErrorBadRequest';
 import { ErrorMFARequired } from '@/api/errors/ErrorMFARequired';
 import { ErrorTooManyRequests } from '@/api/errors/ErrorTooManyRequests';
-import { TokenInfo, UpdatedUser, User, UsersApi } from '@/types/users';
+import {
+    AccountSetupData,
+    FreezeStatus,
+    SetUserSettingsData,
+    TokenInfo,
+    UpdatedUser,
+    User,
+    UsersApi,
+    UserSettings,
+} from '@/types/users';
 import { HttpClient } from '@/utils/httpClient';
 import { ErrorTokenExpired } from '@/api/errors/ErrorTokenExpired';
+import { APIError } from '@/utils/error';
 
 /**
  * AuthHttpApi is a console Auth API.
@@ -20,13 +30,14 @@ export class AuthHttpApi implements UsersApi {
      * Used to resend an registration confirmation email.
      *
      * @param email - email of newly created user
+     * @returns requestID to be used for code activation.
      * @throws Error
      */
-    public async resendEmail(email: string): Promise<void> {
+    public async resendEmail(email: string): Promise<string> {
         const path = `${this.ROOT_PATH}/resend-email/${email}`;
         const response = await this.http.post(path, email);
         if (response.ok) {
-            return;
+            return response.headers.get('x-request-id') ?? '';
         }
 
         const result = await response.json();
@@ -35,7 +46,11 @@ export class AuthHttpApi implements UsersApi {
         case 429:
             throw new ErrorTooManyRequests(errMsg);
         default:
-            throw new Error(errMsg);
+            throw new APIError({
+                status: response.status,
+                message: errMsg,
+                requestID: response.headers.get('x-request-id'),
+            });
         }
     }
 
@@ -77,7 +92,46 @@ export class AuthHttpApi implements UsersApi {
         case 429:
             throw new ErrorTooManyRequests(errMsg);
         default:
-            throw new Error(errMsg);
+            throw new APIError({
+                status: response.status,
+                message: errMsg,
+                requestID: response.headers.get('x-request-id'),
+            });
+        }
+    }
+
+    /**
+     * Used to verify signup code.
+     * @param email
+     * @param code - the code to verify
+     * @param signupId - the request ID of the signup request or resend email request
+     */
+    public async verifySignupCode(email: string, code: string, signupId: string): Promise<TokenInfo> {
+        const path = `${this.ROOT_PATH}/code-activation`;
+        const body = {
+            email,
+            code,
+            signupId,
+        };
+
+        const response = await this.http.patch(path, JSON.stringify(body));
+        const result = await response.json();
+        if (response.ok) {
+            return new TokenInfo(result.token, new Date(result.expiresAt));
+        }
+
+        const errMsg = result.error || 'Failed to activate account';
+        switch (response.status) {
+        case 400:
+            throw new ErrorBadRequest(errMsg);
+        case 429:
+            throw new ErrorTooManyRequests(errMsg);
+        default:
+            throw new APIError({
+                status: response.status,
+                message: errMsg,
+                requestID: response.headers.get('x-request-id'),
+            });
         }
     }
 
@@ -94,7 +148,11 @@ export class AuthHttpApi implements UsersApi {
             return;
         }
 
-        throw new Error('Can not logout. Please try again later');
+        throw new APIError({
+            status: response.status,
+            message: 'Can not logout. Please try again later',
+            requestID: response.headers.get('x-request-id'),
+        });
     }
 
     /**
@@ -121,7 +179,11 @@ export class AuthHttpApi implements UsersApi {
         case 429:
             throw new ErrorTooManyRequests(errMsg);
         default:
-            throw new Error(errMsg);
+            throw new APIError({
+                status: response.status,
+                message: errMsg,
+                requestID: response.headers.get('x-request-id'),
+            });
         }
     }
 
@@ -142,7 +204,31 @@ export class AuthHttpApi implements UsersApi {
             return;
         }
 
-        throw new Error('can not update user data');
+        throw new APIError({
+            status: response.status,
+            message: 'Can not update user data',
+            requestID: response.headers.get('x-request-id'),
+        });
+    }
+
+    /**
+     * Used to update user details after signup.
+     *
+     * @param userInfo - the information to be added to account.
+     * @throws Error
+     */
+    public async setupAccount(userInfo: AccountSetupData): Promise<void> {
+        const path = `${this.ROOT_PATH}/account/setup`;
+        const response = await this.http.patch(path, JSON.stringify(userInfo));
+        if (response.ok) {
+            return;
+        }
+
+        throw new APIError({
+            status: response.status,
+            message: 'Can not setup account',
+            requestID: response.headers.get('x-request-id'),
+        });
     }
 
     /**
@@ -164,6 +250,9 @@ export class AuthHttpApi implements UsersApi {
                 userResponse.partner,
                 userResponse.password,
                 userResponse.projectLimit,
+                userResponse.projectStorageLimit,
+                userResponse.projectBandwidthLimit,
+                userResponse.projectSegmentLimit,
                 userResponse.paidTier,
                 userResponse.isMFAEnabled,
                 userResponse.isProfessional,
@@ -172,10 +261,16 @@ export class AuthHttpApi implements UsersApi {
                 userResponse.employeeCount,
                 userResponse.haveSalesContact,
                 userResponse.mfaRecoveryCodeCount,
+                userResponse.createdAt,
+                userResponse.pendingVerification,
             );
         }
 
-        throw new Error('can not get user data');
+        throw new APIError({
+            status: response.status,
+            message: 'Can not get user data',
+            requestID: response.headers.get('x-request-id'),
+        });
     }
 
     /**
@@ -197,7 +292,11 @@ export class AuthHttpApi implements UsersApi {
         }
 
         const result = await response.json();
-        throw new Error(result.error);
+        throw new APIError({
+            status: response.status,
+            message: result.error,
+            requestID: response.headers.get('x-request-id'),
+        });
     }
 
     /**
@@ -216,7 +315,11 @@ export class AuthHttpApi implements UsersApi {
             return;
         }
 
-        throw new Error('can not delete user');
+        throw new APIError({
+            status: response.status,
+            message: 'Can not delete user',
+            requestID: response.headers.get('x-request-id'),
+        });
     }
 
     /**
@@ -224,16 +327,79 @@ export class AuthHttpApi implements UsersApi {
      *
      * @throws Error
      */
-    public async getFrozenStatus(): Promise<boolean> {
+    public async getFrozenStatus(): Promise<FreezeStatus> {
         const path = `${this.ROOT_PATH}/account/freezestatus`;
         const response = await this.http.get(path);
         if (response.ok) {
             const responseData = await response.json();
 
-            return responseData.frozen;
+            return new FreezeStatus(
+                responseData.frozen,
+                responseData.warned,
+            );
         }
 
-        throw new Error('can not get user frozen status');
+        throw new APIError({
+            status: response.status,
+            message: 'Can not get user frozen status',
+            requestID: response.headers.get('x-request-id'),
+        });
+    }
+
+    /**
+     * Fetches user's settings.
+     *
+     * @throws Error
+     */
+    public async getUserSettings(): Promise<UserSettings> {
+        const path = `${this.ROOT_PATH}/account/settings`;
+        const response = await this.http.get(path);
+        if (response.ok) {
+            const responseData = await response.json();
+
+            return new UserSettings(
+                responseData.sessionDuration,
+                responseData.onboardingStart,
+                responseData.onboardingEnd,
+                responseData.passphrasePrompt,
+                responseData.onboardingStep,
+            );
+        }
+
+        throw new APIError({
+            status: response.status,
+            message: 'Can not get user settings',
+            requestID: response.headers.get('x-request-id'),
+        });
+    }
+
+    /**
+     * Changes user's settings.
+     *
+     * @param data
+     * @returns UserSettings
+     * @throws Error
+     */
+    public async updateSettings(data: SetUserSettingsData): Promise<UserSettings> {
+        const path = `${this.ROOT_PATH}/account/settings`;
+        const response = await this.http.patch(path, JSON.stringify(data));
+        if (response.ok) {
+            const responseData = await response.json();
+
+            return new UserSettings(
+                responseData.sessionDuration,
+                responseData.onboardingStart,
+                responseData.onboardingEnd,
+                responseData.passphrasePrompt,
+                responseData.onboardingStep,
+            );
+        }
+
+        throw new APIError({
+            status: response.status,
+            message: 'Can not update user settings',
+            requestID: response.headers.get('x-request-id'),
+        });
     }
 
     // TODO: remove secret after Vanguard release
@@ -243,10 +409,10 @@ export class AuthHttpApi implements UsersApi {
      * @param user - stores user information
      * @param secret - registration token used in Vanguard release
      * @param captchaResponse - captcha response
-     * @returns id of created user
+     * @returns requestID to be used for code activation.
      * @throws Error
      */
-    public async register(user: Partial<User>, secret: string, captchaResponse: string): Promise<void> {
+    public async register(user: Partial<User & { storageNeeds: string }>, secret: string, captchaResponse: string): Promise<string> {
         const path = `${this.ROOT_PATH}/register`;
         const body = {
             secret: secret,
@@ -258,6 +424,7 @@ export class AuthHttpApi implements UsersApi {
             isProfessional: user.isProfessional,
             position: user.position,
             companyName: user.companyName,
+            storageNeeds: user.storageNeeds || '',
             employeeCount: user.employeeCount,
             haveSalesContact: user.haveSalesContact,
             captchaResponse: captchaResponse,
@@ -265,17 +432,22 @@ export class AuthHttpApi implements UsersApi {
         };
 
         const response = await this.http.post(path, JSON.stringify(body));
-        if (!response.ok) {
-            const result = await response.json();
-            const errMsg = result.error || 'Cannot register user';
-            switch (response.status) {
-            case 400:
-                throw new ErrorBadRequest(errMsg);
-            case 429:
-                throw new ErrorTooManyRequests(errMsg);
-            default:
-                throw new Error(errMsg);
-            }
+        if (response.ok) {
+            return response.headers.get('x-request-id') ?? '';
+        }
+        const result = await response.json();
+        const errMsg = result.error || 'Cannot register user';
+        switch (response.status) {
+        case 400:
+            throw new ErrorBadRequest(errMsg);
+        case 429:
+            throw new ErrorTooManyRequests(errMsg);
+        default:
+            throw new APIError({
+                status: response.status,
+                message: errMsg,
+                requestID: response.headers.get('x-request-id'),
+            });
         }
     }
 
@@ -292,7 +464,11 @@ export class AuthHttpApi implements UsersApi {
             return await response.json();
         }
 
-        throw new Error('Can not generate MFA secret. Please try again later');
+        throw new APIError({
+            status: response.status,
+            message: 'Can not generate MFA secret. Please try again later',
+            requestID: response.headers.get('x-request-id'),
+        });
     }
 
     /**
@@ -312,7 +488,11 @@ export class AuthHttpApi implements UsersApi {
             return;
         }
 
-        throw new Error('Can not enable MFA. Please try again later');
+        throw new APIError({
+            status: response.status,
+            message: 'Can not enable MFA. Please try again later',
+            requestID: response.headers.get('x-request-id'),
+        });
     }
 
     /**
@@ -335,7 +515,11 @@ export class AuthHttpApi implements UsersApi {
 
         const result = await response.json();
         const errMsg = result.error || 'Cannot disable MFA. Please try again later';
-        throw new Error(errMsg);
+        throw new APIError({
+            status: response.status,
+            message: errMsg,
+            requestID: response.headers.get('x-request-id'),
+        });
     }
 
     /**
@@ -351,7 +535,41 @@ export class AuthHttpApi implements UsersApi {
             return await response.json();
         }
 
-        throw new Error('Can not generate MFA recovery codes. Please try again later');
+        throw new APIError({
+            status: response.status,
+            message: 'Can not generate MFA recovery codes. Please try again later',
+            requestID: response.headers.get('x-request-id'),
+        });
+    }
+
+    /**
+     * Generate user's MFA recovery codes requiring a code.
+     *
+     * @throws Error
+     */
+    public async regenerateUserMFARecoveryCodes(passcode?: string, recoveryCode?: string): Promise<string[]> {
+        if (!passcode && !recoveryCode) {
+            throw new Error('Either passcode or recovery code should be provided');
+        }
+        const path = `${this.ROOT_PATH}/mfa/regenerate-recovery-codes`;
+        const body = {
+            passcode: passcode || null,
+            recoveryCode: recoveryCode || null,
+        };
+
+        const response = await this.http.post(path, JSON.stringify(body));
+
+        if (response.ok) {
+            return await response.json();
+        }
+
+        const result = await response.json();
+        const errMsg = result.error || 'Cannot regenerate MFA codes. Please try again later';
+        throw new APIError({
+            status: response.status,
+            message: errMsg,
+            requestID: response.headers.get('x-request-id'),
+        });
     }
 
     /**
@@ -379,10 +597,10 @@ export class AuthHttpApi implements UsersApi {
 
         if (text) {
             const result = JSON.parse(text);
-            if (result.code == 'mfa_required') {
+            if (result.code === 'mfa_required') {
                 throw new ErrorMFARequired();
             }
-            if (result.code == 'token_expired') {
+            if (result.code === 'token_expired') {
                 throw new ErrorTokenExpired();
             }
             if (result.error) {
@@ -398,7 +616,11 @@ export class AuthHttpApi implements UsersApi {
         case 400:
             throw new ErrorBadRequest(errMsg);
         default:
-            throw new Error(errMsg);
+            throw new APIError({
+                status: response.status,
+                message: errMsg,
+                requestID: response.headers.get('x-request-id'),
+            });
         }
     }
 
@@ -416,6 +638,29 @@ export class AuthHttpApi implements UsersApi {
             return new Date(await response.json());
         }
 
-        throw new Error('Unable to refresh session.');
+        throw new APIError({
+            status: response.status,
+            message: 'Unable to refresh session.',
+            requestID: response.headers.get('x-request-id'),
+        });
+    }
+
+    /**
+     * Used to request increase for user's project limit.
+     *
+     * @param limit
+     */
+    public async requestProjectLimitIncrease(limit: string): Promise<void> {
+        const path = `${this.ROOT_PATH}/limit-increase`;
+        const response = await this.http.patch(path, limit);
+
+        if (!response.ok) {
+            const result = await response.json();
+            throw new APIError({
+                status: response.status,
+                message: result.error,
+                requestID: response.headers.get('x-request-id'),
+            });
+        }
     }
 }

@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jtolio/eventkit"
@@ -25,6 +26,7 @@ import (
 	"storj.io/common/storj"
 	"storj.io/common/uuid"
 	"storj.io/storj/satellite/accounting"
+	"storj.io/storj/satellite/buckets"
 	"storj.io/storj/satellite/console"
 	"storj.io/storj/satellite/console/consoleauth"
 	"storj.io/storj/satellite/metabase"
@@ -208,21 +210,21 @@ func (endpoint *Endpoint) checkRate(ctx context.Context, projectID uuid.UUID) (e
 	if !endpoint.config.RateLimiter.Enabled {
 		return nil
 	}
-	limiter, err := endpoint.limiterCache.Get(projectID.String(), func() (interface{}, error) {
+	limiter, err := endpoint.limiterCache.Get(ctx, projectID.String(), func() (*rate.Limiter, error) {
 		rateLimit := rate.Limit(endpoint.config.RateLimiter.Rate)
 		burstLimit := int(endpoint.config.RateLimiter.Rate)
 
-		project, err := endpoint.projects.Get(ctx, projectID)
+		limits, err := endpoint.projectLimits.GetLimits(ctx, projectID)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		if project.RateLimit != nil {
-			rateLimit = rate.Limit(*project.RateLimit)
-			burstLimit = *project.RateLimit
+		if limits.RateLimit != nil {
+			rateLimit = rate.Limit(*limits.RateLimit)
+			burstLimit = *limits.RateLimit
 		}
 		// use the explicitly set burst value if it's defined
-		if project.BurstLimit != nil {
-			burstLimit = *project.BurstLimit
+		if limits.BurstLimit != nil {
+			burstLimit = *limits.BurstLimit
 		}
 
 		return rate.NewLimiter(rateLimit, burstLimit), nil
@@ -231,11 +233,11 @@ func (endpoint *Endpoint) checkRate(ctx context.Context, projectID uuid.UUID) (e
 		return rpcstatus.Error(rpcstatus.Unavailable, err.Error())
 	}
 
-	if !limiter.(*rate.Limiter).Allow() {
+	if !limiter.Allow() {
 		endpoint.log.Warn("too many requests for project",
 			zap.Stringer("projectID", projectID),
-			zap.Float64("rate limit", float64(limiter.(*rate.Limiter).Limit())),
-			zap.Float64("burst limit", float64(limiter.(*rate.Limiter).Burst())))
+			zap.Float64("rate limit", float64(limiter.Limit())),
+			zap.Float64("burst limit", float64(limiter.Burst())))
 
 		mon.Event("metainfo_rate_limit_exceeded") //mon:locked
 
@@ -245,22 +247,28 @@ func (endpoint *Endpoint) checkRate(ctx context.Context, projectID uuid.UUID) (e
 	return nil
 }
 
-func (endpoint *Endpoint) validateBucket(ctx context.Context, bucket []byte) (err error) {
-	defer mon.Task()(&ctx)(&err)
-
+func (endpoint *Endpoint) validateBucketNameLength(bucket []byte) (err error) {
 	if len(bucket) == 0 {
-		return Error.Wrap(storj.ErrNoBucket.New(""))
+		return Error.Wrap(buckets.ErrNoBucket.New(""))
 	}
 
 	if len(bucket) < 3 || len(bucket) > 63 {
 		return Error.New("bucket name must be at least 3 and no more than 63 characters long")
 	}
 
+	return nil
+}
+
+func (endpoint *Endpoint) validateBucketName(bucket []byte) error {
+	if err := endpoint.validateBucketNameLength(bucket); err != nil {
+		return err
+	}
+
 	// Regexp not used because benchmark shows it will be slower for valid bucket names
 	// https://gist.github.com/mniewrzal/49de3af95f36e63e88fac24f565e444c
 	labels := bytes.Split(bucket, []byte("."))
 	for _, label := range labels {
-		err = validateBucketLabel(label)
+		err := validateBucketLabel(label)
 		if err != nil {
 			return err
 		}
@@ -282,8 +290,8 @@ func validateBucketLabel(label []byte) error {
 		return Error.New("bucket label must start with a lowercase letter or number")
 	}
 
-	if label[0] == '-' || label[len(label)-1] == '-' {
-		return Error.New("bucket label cannot start or end with a hyphen")
+	if !isLowerLetter(label[len(label)-1]) && !isDigit(label[len(label)-1]) {
+		return Error.New("bucket label must end with a lowercase letter or number")
 	}
 
 	for i := 1; i < len(label)-1; i++ {
@@ -292,6 +300,13 @@ func validateBucketLabel(label []byte) error {
 		}
 	}
 
+	return nil
+}
+
+func validateObjectVersion(version []byte) error {
+	if len(version) != 0 && len(version) != 16 {
+		return Error.New("invalid object version length")
+	}
 	return nil
 }
 
@@ -490,5 +505,25 @@ func (endpoint *Endpoint) checkEncryptedMetadataSize(encryptedMetadata, encrypte
 	if metadataSize > 0 && len(encryptedKey) != encryptedKeySize {
 		return rpcstatus.Errorf(rpcstatus.InvalidArgument, "Encrypted metadata key size is invalid, got %v, expected %v", len(encryptedKey), encryptedKeySize)
 	}
+	return nil
+}
+
+func (endpoint *Endpoint) checkObjectUploadRate(ctx context.Context, projectID uuid.UUID, bucketName []byte, objectKey []byte) error {
+	if !endpoint.config.UploadLimiter.Enabled {
+		return nil
+	}
+
+	limited := true
+	// if object location is in cache it means that we won't allow to upload yet here,
+	// if it's not or internally key expired we are good to go
+	key := strings.Join([]string{string(projectID[:]), string(bucketName), string(objectKey)}, "/")
+	_, _ = endpoint.singleObjectLimitCache.Get(ctx, key, func() (struct{}, error) {
+		limited = false
+		return struct{}{}, nil
+	})
+	if limited {
+		return rpcstatus.Error(rpcstatus.ResourceExhausted, "Too Many Requests")
+	}
+
 	return nil
 }

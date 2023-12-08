@@ -42,6 +42,22 @@ test_branch() {
     test "$BRANCH_DIR" "$@"
 }
 
+install_sim_noquic(){
+    local bin_dir="$1"
+    mkdir -p ${bin_dir}
+
+    go build -race -tags noquic -v -o ${bin_dir}/storagenode storj.io/storj/cmd/storagenode >/dev/null 2>&1
+    go build -race -tags noquic -v -o ${bin_dir}/satellite storj.io/storj/cmd/satellite >/dev/null 2>&1
+    go build -race -tags noquic -v -o ${bin_dir}/storj-sim storj.io/storj/cmd/storj-sim >/dev/null 2>&1
+    go build -race -tags noquic -v -o ${bin_dir}/versioncontrol storj.io/storj/cmd/versioncontrol >/dev/null 2>&1
+
+    go build -race -tags noquic -v -o ${bin_dir}/uplink storj.io/storj/cmd/uplink >/dev/null 2>&1
+    go build -race -tags noquic -v -o ${bin_dir}/identity storj.io/storj/cmd/identity >/dev/null 2>&1
+    go build -race -tags noquic -v -o ${bin_dir}/certificates storj.io/storj/cmd/certificates >/dev/null 2>&1
+
+    GOBIN=${bin_dir} go install -race -tags noquic storj.io/gateway@latest
+}
+
 ##
 ## Build the release and branch binaries and set up the network
 ##
@@ -68,12 +84,15 @@ EOF
 
 SCRIPTDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
-GOBIN="$RELEASE_DIR"/bin make -C "$RELEASE_DIR" install-sim
+pushd $RELEASE_DIR
+    install_sim_noquic "$RELEASE_DIR"/bin
+popd
+
 GOBIN="$BRANCH_DIR"/bin  make -C "$BRANCH_DIR" install-sim
 
 echo "Overriding default max segment size to 6MiB"
 pushd $RELEASE_DIR
-    GOBIN=$RELEASE_DIR/bin go install -v -ldflags "-X 'storj.io/uplink.maxSegmentSize=6MiB'" storj.io/storj/cmd/uplink
+    GOBIN=$RELEASE_DIR/bin go install -tags noquic -v -ldflags "-X 'storj.io/uplink.maxSegmentSize=6MiB'" storj.io/storj/cmd/uplink
 popd
 pushd $BRANCH_DIR
     GOBIN=$BRANCH_DIR/bin go install -v -ldflags "-X 'storj.io/uplink.maxSegmentSize=6MiB'" storj.io/storj/cmd/uplink
@@ -126,7 +145,6 @@ fi
 # setup multinode if config is missing
 MULTINODE_DIR=$(storj-sim network env MULTINODE_0_DIR)
 if [ ! -f "$MULTINODE_DIR/config.yaml" ]; then
-    identity --identity-dir $MULTINODE_DIR --concurrency 1 --difficulty 8 create .
     multinode $(storj-sim --host "$STORJ_NETWORK_HOST4" network env MULTINODE_0_SETUP_ARGS)
 fi
 
@@ -145,6 +163,20 @@ sed -i -e "s#storage.whitelisted-satellites#storage2.trust.sources#g" "$(storj-s
 sed -i -e "s#storage.whitelisted-satellites#storage2.trust.sources#g" "$(storj-sim network env STORAGENODE_7_DIR)"/config.yaml
 sed -i -e "s#storage.whitelisted-satellites#storage2.trust.sources#g" "$(storj-sim network env STORAGENODE_8_DIR)"/config.yaml
 sed -i -e "s#storage.whitelisted-satellites#storage2.trust.sources#g" "$(storj-sim network env STORAGENODE_9_DIR)"/config.yaml
+
+# For cases where the release predates changeset I0e7e92498c3da768df5b4d5fb213dcd2d4862924,
+# adjust all last_net values for future compatibility. this migration step is only necessary for
+# satellites which existed before the aforementioned changeset and use dev defaults (to be specific,
+# DistinctIP is off). This is a harmless change for any other satellites using dev defaults.
+if [ "${STORJ_SIM_POSTGRES#cockroach:}" != "$STORJ_SIM_POSTGRES" ]; then
+    schema_set=
+    pgurl="${STORJ_SIM_POSTGRES/cockroach:/postgres:}"
+    pgurl="${pgurl%?sslmode=disable}/satellite/0?sslmode=disable"
+else
+    schema_set='set search_path to "satellite/0"; '
+    pgurl="$STORJ_SIM_POSTGRES"
+fi
+psql "$pgurl" -c "${schema_set}update nodes set last_net = last_ip_port"
 
 # Run with 9 nodes to exercise more code paths with one node being offline.
 STORJ_NUM_NODES=9

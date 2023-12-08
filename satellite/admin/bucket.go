@@ -21,7 +21,7 @@ func validateBucketPathParameters(vars map[string]string) (project uuid.NullUUID
 		return project, bucket, fmt.Errorf("project-uuid missing")
 	}
 
-	project.UUID, err = uuid.FromString(projectUUIDString)
+	project.UUID, err = uuidFromString(projectUUIDString)
 	if err != nil {
 		return project, bucket, fmt.Errorf("project-uuid is not a valid uuid")
 	}
@@ -46,10 +46,12 @@ func parsePlacementConstraint(regionCode string) (storj.PlacementConstraint, err
 		return storj.US, nil
 	case "DE":
 		return storj.DE, nil
+	case "NR":
+		return storj.NR, nil
 	case "":
-		return storj.EveryCountry, fmt.Errorf("missing region parameter")
+		return storj.DefaultPlacement, fmt.Errorf("missing region parameter")
 	default:
-		return storj.EveryCountry, fmt.Errorf("unrecognized region parameter: %s", regionCode)
+		return storj.DefaultPlacement, fmt.Errorf("unrecognized region parameter: %s", regionCode)
 	}
 }
 
@@ -64,7 +66,7 @@ func (server *Server) updateBucket(w http.ResponseWriter, r *http.Request, place
 
 	b, err := server.buckets.GetBucket(ctx, bucket, project.UUID)
 	if err != nil {
-		if storj.ErrBucketNotFound.Has(err) {
+		if buckets.ErrBucketNotFound.Has(err) {
 			sendJSONError(w, "bucket does not exist", "", http.StatusBadRequest)
 		} else {
 			sendJSONError(w, "unable to create geofence for bucket", err.Error(), http.StatusInternalServerError)
@@ -77,7 +79,7 @@ func (server *Server) updateBucket(w http.ResponseWriter, r *http.Request, place
 	_, err = server.buckets.UpdateBucket(ctx, b)
 	if err != nil {
 		switch {
-		case storj.ErrBucketNotFound.Has(err):
+		case buckets.ErrBucketNotFound.Has(err):
 			sendJSONError(w, "bucket does not exist", "", http.StatusBadRequest)
 		case buckets.ErrBucketNotEmpty.Has(err):
 			sendJSONError(w, "bucket must be empty", "", http.StatusBadRequest)
@@ -93,7 +95,7 @@ func (server *Server) updateBucket(w http.ResponseWriter, r *http.Request, place
 func (server *Server) createGeofenceForBucket(w http.ResponseWriter, r *http.Request) {
 	placement, err := parsePlacementConstraint(r.URL.Query().Get("region"))
 	if err != nil {
-		sendJSONError(w, err.Error(), "available: EU, EEA, US, DE", http.StatusBadRequest)
+		sendJSONError(w, err.Error(), "available: EU, EEA, US, DE, NR", http.StatusBadRequest)
 		return
 	}
 
@@ -101,7 +103,7 @@ func (server *Server) createGeofenceForBucket(w http.ResponseWriter, r *http.Req
 }
 
 func (server *Server) deleteGeofenceForBucket(w http.ResponseWriter, r *http.Request) {
-	server.updateBucket(w, r, storj.EveryCountry)
+	server.updateBucket(w, r, storj.DefaultPlacement)
 }
 
 func (server *Server) getBucketInfo(w http.ResponseWriter, r *http.Request) {
@@ -115,8 +117,8 @@ func (server *Server) getBucketInfo(w http.ResponseWriter, r *http.Request) {
 
 	b, err := server.buckets.GetBucket(ctx, bucket, project.UUID)
 	if err != nil {
-		if storj.ErrBucketNotFound.Has(err) {
-			sendJSONError(w, "bucket does not exist", "", http.StatusBadRequest)
+		if buckets.ErrBucketNotFound.Has(err) {
+			sendJSONError(w, "bucket does not exist", "", http.StatusNotFound)
 		} else {
 			sendJSONError(w, "unable to check bucket", err.Error(), http.StatusInternalServerError)
 		}

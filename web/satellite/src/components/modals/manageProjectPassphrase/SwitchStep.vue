@@ -3,17 +3,17 @@
 
 <template>
     <div class="switch-step">
-        <h1 class="switch-step__title">Switch passphrase</h1>
         <p class="switch-step__info">
             Switch passphrases to view existing data that is uploaded with a different passphrase, or upload new data.
             Please note that you won’t see the previous data once you switch passphrases.
         </p>
         <VInput
             label="Encryption Passphrase"
-            :is-password="true"
+            is-password
             width="100%"
             height="56px"
             placeholder="Enter Encryption Passphrase"
+            :autocomplete="autocompleteValue"
             :error="enterError"
             @setData="setPassphrase"
         />
@@ -21,37 +21,36 @@
             <VButton
                 label="Back"
                 width="100%"
-                height="48px"
+                height="52px"
+                font-size="14px"
+                border-radius="10px"
                 :is-white="true"
                 :on-press="onCancel"
             />
             <VButton
-                label="Switch Passphrase"
+                label="Continue ->"
                 width="100%"
-                height="48px"
+                height="52px"
+                font-size="14px"
+                border-radius="10px"
                 :on-press="onSwitch"
-                :is-disabled="isLoading"
+                :is-disabled="!passphrase"
             />
         </div>
     </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, ref } from 'vue';
 
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
-import { useNotify, useStore } from '@/utils/hooks';
-import { ACCESS_GRANTS_ACTIONS } from '@/store/modules/accessGrants';
-import { AccessGrant, EdgeCredentials } from '@/types/accessGrants';
-import { OBJECTS_ACTIONS, OBJECTS_MUTATIONS } from '@/store/modules/objects';
-import { PROJECTS_ACTIONS } from '@/store/modules/projects';
-import { MetaUtils } from '@/utils/meta';
-import { AnalyticsErrorEventSource } from '@/utils/constants/analyticsEventNames';
+import { useNotify } from '@/utils/hooks';
+import { EdgeCredentials } from '@/types/accessGrants';
+import { useAppStore } from '@/store/modules/appStore';
+import { useBucketsStore } from '@/store/modules/bucketsStore';
+import { useProjectsStore } from '@/store/modules/projectsStore';
 
 import VButton from '@/components/common/VButton.vue';
 import VInput from '@/components/common/VInput.vue';
-
-const FILE_BROWSER_AG_NAME = 'Web file browser API key';
 
 const props = withDefaults(defineProps<{
     onCancel?: () => void,
@@ -59,27 +58,26 @@ const props = withDefaults(defineProps<{
     onCancel: () => () => {},
 });
 
+const bucketsStore = useBucketsStore();
+const appStore = useAppStore();
+const projectsStore = useProjectsStore();
 const notify = useNotify();
-const store = useStore();
 
 const passphrase = ref<string>('');
 const enterError = ref<string>('');
-const isLoading = ref<boolean>(false);
-const worker = ref<Worker | null>(null);
 
 /**
- * Returns web file browser api key from vuex state.
+ * Returns formatted autocomplete value.
  */
-const apiKey = computed((): string => {
-    return store.state.objectsModule.apiKey;
+const autocompleteValue = computed((): string => {
+    return `section-${selectedProjectID.value.toLowerCase()} new-password`;
 });
 
 /**
- * Lifecycle hook after initial render.
- * Sets local worker.
+ * Returns selected project ID from store.
  */
-onMounted(() => {
-    setWorker();
+const selectedProjectID = computed((): string => {
+    return projectsStore.state.selectedProject.id;
 });
 
 /**
@@ -96,107 +94,21 @@ function setPassphrase(value: string): void {
 }
 
 /**
- * Sets local worker with worker instantiated in store.
- */
-function setWorker(): void {
-    worker.value = store.state.accessGrantsModule.accessGrantsWebWorker;
-    if (worker.value) {
-        worker.value.onerror = (error: ErrorEvent) => {
-            notify.error(error.message, AnalyticsErrorEventSource.SWITCH_PROJECT_LEVEL_PASSPHRASE_MODAL);
-        };
-    }
-}
-
-/**
- * Generates s3 credentials from provided passphrase and stores it in vuex state to be reused.
- */
-async function setAccess(): Promise<void> {
-    if (!worker.value) {
-        throw new Error('Worker is not defined');
-    }
-
-    if (!apiKey.value) {
-        await store.dispatch(ACCESS_GRANTS_ACTIONS.DELETE_BY_NAME_AND_PROJECT_ID, FILE_BROWSER_AG_NAME);
-        const cleanAPIKey: AccessGrant = await store.dispatch(ACCESS_GRANTS_ACTIONS.CREATE, FILE_BROWSER_AG_NAME);
-        await store.dispatch(OBJECTS_ACTIONS.SET_API_KEY, cleanAPIKey.secret);
-    }
-
-    const now = new Date();
-    const inThreeDays = new Date(now.setDate(now.getDate() + 3));
-
-    await worker.value.postMessage({
-        'type': 'SetPermission',
-        'isDownload': true,
-        'isUpload': true,
-        'isList': true,
-        'isDelete': true,
-        'notAfter': inThreeDays.toISOString(),
-        'buckets': [],
-        'apiKey': apiKey.value,
-    });
-
-    const grantEvent: MessageEvent = await new Promise(resolve => {
-        if (worker.value) {
-            worker.value.onmessage = resolve;
-        }
-    });
-    if (grantEvent.data.error) {
-        throw new Error(grantEvent.data.error);
-    }
-
-    const salt = await store.dispatch(PROJECTS_ACTIONS.GET_SALT, store.getters.selectedProject.id);
-    const satelliteNodeURL: string = MetaUtils.getMetaContent('satellite-nodeurl');
-
-    worker.value.postMessage({
-        'type': 'GenerateAccess',
-        'apiKey': grantEvent.data.value,
-        'passphrase': passphrase.value,
-        'salt': salt,
-        'satelliteNodeURL': satelliteNodeURL,
-    });
-
-    const accessGrantEvent: MessageEvent = await new Promise(resolve => {
-        if (worker.value) {
-            worker.value.onmessage = resolve;
-        }
-    });
-    if (accessGrantEvent.data.error) {
-        throw new Error(accessGrantEvent.data.error);
-    }
-
-    const accessGrant = accessGrantEvent.data.value;
-
-    const gatewayCredentials: EdgeCredentials = await store.dispatch(ACCESS_GRANTS_ACTIONS.GET_GATEWAY_CREDENTIALS, { accessGrant });
-    await store.dispatch(OBJECTS_ACTIONS.SET_GATEWAY_CREDENTIALS, gatewayCredentials);
-    await store.dispatch(OBJECTS_ACTIONS.SET_S3_CLIENT);
-    store.commit(OBJECTS_MUTATIONS.SET_PROMPT_FOR_PASSPHRASE, false);
-}
-
-/**
  * Sets new passphrase and generates new edge credentials.
  */
 async function onSwitch(): Promise<void> {
-    if (isLoading.value) return;
-
     if (!passphrase.value) {
         enterError.value = 'Passphrase can\'t be empty';
 
         return;
     }
 
-    isLoading.value = true;
+    bucketsStore.setEdgeCredentials(new EdgeCredentials());
+    bucketsStore.setPassphrase(passphrase.value);
+    bucketsStore.setPromptForPassphrase(false);
 
-    try {
-        await setAccess();
-        store.dispatch(OBJECTS_ACTIONS.SET_PASSPHRASE, passphrase.value);
-
-        notify.success('Passphrase was switched successfully');
-        store.commit(APP_STATE_MUTATIONS.TOGGLE_MANAGE_PROJECT_PASSPHRASE_MODAL_SHOWN);
-    } catch (error) {
-        await notify.error(error.message, AnalyticsErrorEventSource.SWITCH_PROJECT_LEVEL_PASSPHRASE_MODAL);
-    } finally {
-        isLoading.value = false;
-    }
+    notify.success('Passphrase was switched successfully');
+    appStore.removeActiveModal();
 }
 </script>
 
@@ -206,32 +118,29 @@ async function onSwitch(): Promise<void> {
     flex-direction: column;
     align-items: center;
     font-family: 'font_regular', sans-serif;
-    max-width: 433px;
-
-    &__title {
-        font-family: 'font_bold', sans-serif;
-        font-size: 32px;
-        line-height: 39px;
-        color: #1b2533;
-        margin: 14px 0;
-    }
+    max-width: 350px;
 
     &__info {
         font-size: 14px;
         line-height: 19px;
         color: #354049;
-        margin-bottom: 24px;
+        padding-bottom: 16px;
+        margin-bottom: 6px;
+        border-bottom: 1px solid var(--c-grey-2);
+        text-align: left;
     }
 
     &__buttons {
         display: flex;
         align-items: center;
         justify-content: center;
-        column-gap: 33px;
-        margin-top: 20px;
+        column-gap: 16px;
+        margin-top: 16px;
+        padding-top: 24px;
+        border-top: 1px solid var(--c-grey-2);
         width: 100%;
 
-        @media screen and (max-width: 530px) {
+        @media screen and (width <= 530px) {
             column-gap: unset;
             flex-direction: column-reverse;
             row-gap: 15px;

@@ -14,6 +14,7 @@
                     label="Old Password"
                     placeholder="Old Password"
                     is-password
+                    :autocomplete="autocompleteValue"
                     :error="oldPasswordError"
                     @setData="setOldPassword"
                 />
@@ -61,15 +62,17 @@
     </VModal>
 </template>
 
-<script lang="ts">
-import { Component, Vue } from 'vue-property-decorator';
+<script setup lang="ts">
+import { computed, ref } from 'vue';
+import { useRouter } from 'vue-router';
 
 import { AuthHttpApi } from '@/api/auth';
-import { Validator } from '@/utils/validation';
-import { RouteConfig } from '@/router';
-import { AnalyticsHttpApi } from '@/api/analytics';
+import { RouteConfig } from '@/types/router';
 import { AnalyticsErrorEventSource, AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
+import { useNotify } from '@/utils/hooks';
+import { useConfigStore } from '@/store/modules/configStore';
+import { useAppStore } from '@/store/modules/appStore';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 import PasswordStrength from '@/components/common/PasswordStrength.vue';
 import VInput from '@/components/common/VInput.vue';
@@ -78,133 +81,131 @@ import VModal from '@/components/common/VModal.vue';
 
 import ChangePasswordIcon from '@/../static/images/account/changePasswordPopup/changePassword.svg';
 
+const { config } = useConfigStore().state;
+const analyticsStore = useAnalyticsStore();
+const appStore = useAppStore();
+const notify = useNotify();
+const router = useRouter();
+
 const DELAY_BEFORE_REDIRECT = 2000; // 2 sec
+const auth: AuthHttpApi = new AuthHttpApi();
 
-// @vue/component
-@Component({
-    components: {
-        ChangePasswordIcon,
-        VInput,
-        VButton,
-        VModal,
-        PasswordStrength,
-    },
-})
-export default class ChangePasswordModal extends Vue {
-    private oldPassword = '';
-    private newPassword = '';
-    private confirmationPassword = '';
+const oldPassword = ref<string>('');
+const newPassword = ref<string>('');
+const confirmationPassword = ref<string>('');
+const oldPasswordError = ref<string>('');
+const newPasswordError = ref<string>('');
+const confirmationPasswordError = ref<string>('');
+const isPasswordStrengthShown = ref<boolean>(false);
 
-    private oldPasswordError = '';
-    private newPasswordError = '';
-    private confirmationPasswordError = '';
+/**
+ * Returns formatted autocomplete value.
+ */
+const autocompleteValue = computed((): string => {
+    return `section-${config.satelliteName.substring(0, 2).toLowerCase()} current-password`;
+});
 
-    private readonly auth: AuthHttpApi = new AuthHttpApi();
+/**
+ * Enables password strength info container.
+ */
+function showPasswordStrength(): void {
+    isPasswordStrengthShown.value = true;
+}
 
-    private readonly analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
+/**
+ * Disables password strength info container.
+ */
+function hidePasswordStrength(): void {
+    isPasswordStrengthShown.value = false;
+}
 
-    /**
-     * Indicates if hint popup needs to be shown while creating new password.
-     */
-    public isPasswordStrengthShown = false;
+/**
+ * Sets old password from input.
+ */
+function setOldPassword(value: string): void {
+    oldPassword.value = value;
+    oldPasswordError.value = '';
+}
 
-    /**
-     * Enables password strength info container.
-     */
-    public showPasswordStrength(): void {
-        this.isPasswordStrengthShown = true;
+/**
+ * Sets new password from input.
+ */
+function setNewPassword(value: string): void {
+    newPassword.value = value;
+    newPasswordError.value = '';
+}
+
+/**
+ * Sets password confirmation from input.
+ */
+function setPasswordConfirmation(value: string): void {
+    confirmationPassword.value = value;
+    confirmationPasswordError.value = '';
+}
+
+/**
+ * Validates inputs and if everything are correct tries to change password and close popup.
+ */
+async function onUpdateClick(): Promise<void> {
+    let hasError = false;
+    if (oldPassword.value.length < 6) {
+        oldPasswordError.value = 'Invalid old password. Must be 6 or more characters';
+        hasError = true;
     }
 
-    /**
-     * Disables password strength info container.
-     */
-    public hidePasswordStrength(): void {
-        this.isPasswordStrengthShown = false;
+    if (newPassword.value.length < config.passwordMinimumLength) {
+        newPasswordError.value = `Invalid password. Use ${config.passwordMinimumLength} or more characters`;
+        hasError = true;
     }
 
-    /**
-     * Sets old password from input.
-     */
-    public setOldPassword(value: string): void {
-        this.oldPassword = value;
-        this.oldPasswordError = '';
+    if (newPassword.value.length > config.passwordMaximumLength) {
+        newPasswordError.value = `Invalid password. Use ${config.passwordMaximumLength} or fewer characters`;
+        hasError = true;
     }
 
-    /**
-     * Sets new password from input.
-     */
-    public setNewPassword(value: string): void {
-        this.newPassword = value;
-        this.newPasswordError = '';
+    if (!confirmationPassword.value) {
+        confirmationPasswordError.value = 'Password required';
+        hasError = true;
     }
 
-    /**
-     * Sets password confirmation from input.
-     */
-    public setPasswordConfirmation(value: string): void {
-        this.confirmationPassword = value;
-        this.confirmationPasswordError = '';
+    if (newPassword.value !== confirmationPassword.value) {
+        confirmationPasswordError.value = 'Password doesn\'t match new one';
+        hasError = true;
     }
 
-    /**
-     * Validates inputs and if everything are correct tries to change password and close popup.
-     */
-    public async onUpdateClick(): Promise<void> {
-        let hasError = false;
-        if (this.oldPassword.length < 6) {
-            this.oldPasswordError = 'Invalid old password. Must be 6 or more characters';
-            hasError = true;
-        }
-
-        if (!Validator.password(this.newPassword)) {
-            this.newPasswordError = 'Invalid password. Use 6 or more characters';
-            hasError = true;
-        }
-
-        if (!this.confirmationPassword) {
-            this.confirmationPasswordError = 'Password required';
-            hasError = true;
-        }
-
-        if (this.newPassword !== this.confirmationPassword) {
-            this.confirmationPasswordError = 'Password not match to new one';
-            hasError = true;
-        }
-
-        if (hasError) {
-            this.analytics.errorEventTriggered(AnalyticsErrorEventSource.CHANGE_PASSWORD_MODAL);
-            return;
-        }
-
-        try {
-            await this.auth.changePassword(this.oldPassword, this.newPassword);
-        } catch (error) {
-            await this.$notify.error(error.message, AnalyticsErrorEventSource.CHANGE_PASSWORD_MODAL);
-
-            return;
-        }
-
-        try {
-            await this.auth.logout();
-
-            setTimeout(() => {
-                this.$router.push(RouteConfig.Login.path);
-            }, DELAY_BEFORE_REDIRECT);
-        } catch (error) {
-            await this.$notify.error(error.message, AnalyticsErrorEventSource.CHANGE_PASSWORD_MODAL);
-        }
-
-        this.analytics.eventTriggered(AnalyticsEvent.PASSWORD_CHANGED);
-        await this.$notify.success('Password successfully changed!');
-        this.closeModal();
+    if (hasError) {
+        analyticsStore.errorEventTriggered(AnalyticsErrorEventSource.CHANGE_PASSWORD_MODAL);
+        return;
     }
 
-    /**
-     * Closes popup.
-     */
-    public closeModal(): void {
-        this.$store.commit(APP_STATE_MUTATIONS.TOGGLE_CHANGE_PASSWORD_MODAL_SHOWN);
+    try {
+        await auth.changePassword(oldPassword.value, newPassword.value);
+    } catch (error) {
+        notify.notifyError(error, AnalyticsErrorEventSource.CHANGE_PASSWORD_MODAL);
+
+        return;
     }
+
+    try {
+        await auth.logout();
+
+        setTimeout(() => {
+            router.push(RouteConfig.Login.path);
+        }, DELAY_BEFORE_REDIRECT);
+    } catch (error) {
+        notify.notifyError(error, AnalyticsErrorEventSource.CHANGE_PASSWORD_MODAL);
+    }
+
+    analyticsStore.eventTriggered(AnalyticsEvent.PASSWORD_CHANGED);
+    notify.success('Password successfully changed!');
+    closeModal();
+}
+
+/**
+ * Closes popup.
+ */
+function closeModal(): void {
+    appStore.removeActiveModal();
 }
 </script>
 
@@ -218,16 +219,16 @@ export default class ChangePasswordModal extends Vue {
         box-sizing: border-box;
         min-width: 550px;
 
-        @media screen and (max-width: 600px) {
+        @media screen and (width <= 600px) {
             min-width: 475px;
             padding: 48px 24px;
         }
 
-        @media screen and (max-width: 530px) {
+        @media screen and (width <= 530px) {
             min-width: 420px;
         }
 
-        @media screen and (max-width: 470px) {
+        @media screen and (width <= 470px) {
             min-width: unset;
         }
 
@@ -236,7 +237,7 @@ export default class ChangePasswordModal extends Vue {
             align-items: center;
             margin-bottom: 20px;
 
-            @media screen and (max-width: 600px) {
+            @media screen and (width <= 600px) {
 
                 svg {
                     display: none;
@@ -250,7 +251,7 @@ export default class ChangePasswordModal extends Vue {
                 color: #384b65;
                 margin: 0 0 0 32px;
 
-                @media screen and (max-width: 600px) {
+                @media screen and (width <= 600px) {
                     font-size: 24px;
                     line-height: 28px;
                     margin: 0;
@@ -265,7 +266,7 @@ export default class ChangePasswordModal extends Vue {
             margin-top: 32px;
             column-gap: 20px;
 
-            @media screen and (max-width: 600px) {
+            @media screen and (width <= 600px) {
                 flex-direction: column-reverse;
                 column-gap: unset;
                 row-gap: 10px;
@@ -283,7 +284,7 @@ export default class ChangePasswordModal extends Vue {
         margin-bottom: 15px;
     }
 
-    @media screen and (max-width: 600px) {
+    @media screen and (width <= 600px) {
 
         :deep(.password-strength-container) {
             width: unset;

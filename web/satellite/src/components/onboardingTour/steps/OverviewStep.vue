@@ -3,11 +3,11 @@
 
 <template>
     <div class="overview-area">
-        <h1 class="overview-area__title" aria-roledescription="title">Welcome to Storj {{ titleLabel }}</h1>
+        <h1 class="overview-area__title" aria-roledescription="title">Welcome to Storj</h1>
         <p class="overview-area__subtitle">Get started using the web browser, or the command line.</p>
         <div class="overview-area__routes">
             <OverviewContainer
-                is-web="true"
+                :is-web="true"
                 title="Start with web browser"
                 info="Start uploading files in the browser and instantly see how your data gets distributed over the Storj network around the world."
                 button-label="Continue in web ->"
@@ -26,85 +26,82 @@
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Vue } from 'vue-property-decorator';
+<script setup lang="ts">
+import { onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 
-import { AnalyticsHttpApi } from '@/api/analytics';
-import { RouteConfig } from '@/router';
-import { AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
-import { MetaUtils } from '@/utils/meta';
-import { PartneredSatellite } from '@/types/common';
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
+import { RouteConfig } from '@/types/router';
+import { AnalyticsErrorEventSource, AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
+import { MODALS } from '@/utils/constants/appStatePopUps';
+import { useNotify } from '@/utils/hooks';
+import { useUsersStore } from '@/store/modules/usersStore';
+import { useAppStore } from '@/store/modules/appStore';
+import { useConfigStore } from '@/store/modules/configStore';
+import { PartneredSatellite } from '@/types/config';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
+import { OnboardingOption } from '@/types/common';
 
 import OverviewContainer from '@/components/onboardingTour/steps/common/OverviewContainer.vue';
 
-// @vue/component
-@Component({
-    components: {
-        OverviewContainer,
-    },
-})
-export default class OverviewStep extends Vue {
-    public projectDashboardPath = RouteConfig.ProjectDashboard.path;
-    public titleLabel = '';
+const analyticsStore = useAnalyticsStore();
+const configStore = useConfigStore();
+const appStore = useAppStore();
+const usersStore = useUsersStore();
+const notify = useNotify();
+const router = useRouter();
 
-    private readonly analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
+const projectDashboardPath = RouteConfig.ProjectDashboard.path;
 
-    /**
-     * Mounted hook after initial render.
-     * Sets correct title label.
-     */
-    public mounted(): void {
-        const partneredSatellites = MetaUtils.getMetaContent('partnered-satellites');
-        if (!partneredSatellites) {
-            this.titleLabel = 'OSP';
-            return;
-        }
+/**
+ * Skips onboarding flow.
+ */
+async function onSkip(): Promise<void> {
+    endOnboarding();
+    await router.push(projectDashboardPath);
+    appStore.updateActiveModal(MODALS.createProjectPassphrase);
+    analyticsStore.linkEventTriggered(AnalyticsEvent.PATH_SELECTED, OnboardingOption.Skip);
+}
 
-        const partneredSatellitesJSON = JSON.parse(partneredSatellites);
-        const isPartnered = partneredSatellitesJSON.find((el: PartneredSatellite) => {
-            return el.name === this.satelliteName;
-        });
-        if (isPartnered) {
-            this.titleLabel = 'DCS';
-            return;
-        }
+/**
+ * Holds button click logic.
+ * Redirects to next step (creating access grant).
+ */
+function onUplinkCLIClick(): void {
+    router.push(RouteConfig.OnboardingTour.with(RouteConfig.OnbCLIStep).with(RouteConfig.AGName).path);
+    analyticsStore.linkEventTriggered(AnalyticsEvent.PATH_SELECTED, OnboardingOption.CLI);
+    analyticsStore.pageVisit(RouteConfig.OnboardingTour.with(RouteConfig.OnbCLIStep).with(RouteConfig.AGName).path);
+}
 
-        this.titleLabel = 'OSP';
-    }
+/**
+ * Redirects to buckets page.
+ */
+async function onUploadInBrowserClick(): Promise<void> {
+    endOnboarding();
+    appStore.updateActiveModal(MODALS.createProjectPassphrase);
+    analyticsStore.linkEventTriggered(AnalyticsEvent.PATH_SELECTED, OnboardingOption.Browser);
+}
 
-    /**
-     * Skips onboarding flow.
-     */
-    public onSkip(): void {
-        this.$router.push(this.projectDashboardPath);
-        this.$store.commit(APP_STATE_MUTATIONS.TOGGLE_CREATE_PROJECT_PASSPHRASE_MODAL_SHOWN);
-    }
-
-    /**
-     * Holds button click logic.
-     * Redirects to next step (creating access grant).
-     */
-    public onUplinkCLIClick(): void {
-        this.$router.push(RouteConfig.OnboardingTour.with(RouteConfig.OnbCLIStep).with(RouteConfig.AGName).path);
-        this.analytics.linkEventTriggered(AnalyticsEvent.PATH_SELECTED, 'CLI');
-        this.analytics.pageVisit(RouteConfig.OnboardingTour.with(RouteConfig.OnbCLIStep).with(RouteConfig.AGName).path);
-    }
-
-    /**
-     * Redirects to buckets page.
-     */
-    public onUploadInBrowserClick(): void {
-        this.$store.commit(APP_STATE_MUTATIONS.TOGGLE_CREATE_PROJECT_PASSPHRASE_MODAL_SHOWN);
-    }
-
-    /**
-     * Returns satellite name.
-     */
-    private get satelliteName(): string {
-        return this.$store.state.appStateModule.satelliteName;
+async function endOnboarding(): Promise<void> {
+    try {
+        await usersStore.updateSettings({ onboardingEnd: true });
+    } catch (error) {
+        notify.notifyError(error, AnalyticsErrorEventSource.ONBOARDING_OVERVIEW_STEP);
     }
 }
+
+/**
+ * Mounted hook after initial render.
+ * Sets correct title label.
+ */
+onMounted(async (): Promise<void> => {
+    try {
+        if (!usersStore.state.settings.onboardingStart) {
+            await usersStore.updateSettings({ onboardingStart: true });
+        }
+    } catch (error) {
+        notify.notifyError(error, AnalyticsErrorEventSource.ONBOARDING_OVERVIEW_STEP);
+    }
+});
 </script>
 
 <style scoped lang="scss">
@@ -153,7 +150,7 @@ export default class OverviewStep extends Vue {
     }
 }
 
-@media screen and (max-width: 760px) {
+@media screen and (width <= 760px) {
 
     .overview-area {
         width: 250px;

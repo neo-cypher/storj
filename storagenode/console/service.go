@@ -354,15 +354,15 @@ func (s *Service) GetSatelliteData(ctx context.Context, satelliteID storj.NodeID
 
 // Satellites represents consolidated data across all satellites.
 type Satellites struct {
-	StorageDaily      []storageusage.Stamp    `json:"storageDaily"`
-	BandwidthDaily    []bandwidth.UsageRollup `json:"bandwidthDaily"`
-	StorageSummary    float64                 `json:"storageSummary"`
-	AverageUsageBytes float64                 `json:"averageUsageBytes"`
-	BandwidthSummary  int64                   `json:"bandwidthSummary"`
-	EgressSummary     int64                   `json:"egressSummary"`
-	IngressSummary    int64                   `json:"ingressSummary"`
-	EarliestJoinedAt  time.Time               `json:"earliestJoinedAt"`
-	Audits            []Audits                `json:"audits"`
+	StorageDaily      []storageusage.StampGroup `json:"storageDaily"`
+	BandwidthDaily    []bandwidth.UsageRollup   `json:"bandwidthDaily"`
+	StorageSummary    float64                   `json:"storageSummary"`
+	AverageUsageBytes float64                   `json:"averageUsageBytes"`
+	BandwidthSummary  int64                     `json:"bandwidthSummary"`
+	EgressSummary     int64                     `json:"egressSummary"`
+	IngressSummary    int64                     `json:"ingressSummary"`
+	EarliestJoinedAt  time.Time                 `json:"earliestJoinedAt"`
+	Audits            []Audits                  `json:"audits"`
 }
 
 // Audits represents audit, suspension and online scores of SNO across all satellites.
@@ -481,4 +481,16 @@ func (s *Service) VerifySatelliteID(ctx context.Context, satelliteID storj.NodeI
 	}
 
 	return nil
+}
+
+// GetSatellitePricingModel returns pricing model for the specified satellite.
+func (s *Service) GetSatellitePricingModel(ctx context.Context, satelliteID storj.NodeID) (pricingModel *pricing.Pricing, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	pricingModel, err = s.pricingDB.Get(ctx, satelliteID)
+	if err != nil {
+		return nil, SNOServiceErr.Wrap(err)
+	}
+
+	return pricingModel, nil
 }

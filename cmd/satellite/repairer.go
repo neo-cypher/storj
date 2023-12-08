@@ -8,22 +8,18 @@ import (
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 
-	"storj.io/common/context2"
 	"storj.io/common/errs2"
 	"storj.io/private/process"
 	"storj.io/private/version"
 	"storj.io/storj/private/revocation"
 	"storj.io/storj/satellite"
 	"storj.io/storj/satellite/metabase"
-	"storj.io/storj/satellite/orders"
 	"storj.io/storj/satellite/satellitedb"
 )
 
 func cmdRepairerRun(cmd *cobra.Command, args []string) (err error) {
 	ctx, _ := process.Ctx(cmd)
 	log := zap.L()
-
-	runCfg.Debug.Address = *process.DebugAddrFlag
 
 	identity, err := runCfg.Identity.Load()
 	if err != nil {
@@ -56,11 +52,6 @@ func cmdRepairerRun(cmd *cobra.Command, args []string) (err error) {
 		err = errs.Combine(err, revocationDB.Close())
 	}()
 
-	rollupsWriteCache := orders.NewRollupsWriteCache(log.Named("orders-write-cache"), db.Orders(), runCfg.Orders.FlushBatchSize)
-	defer func() {
-		err = errs.Combine(err, rollupsWriteCache.CloseAndFlush(context2.WithoutCancellation(ctx)))
-	}()
-
 	peer, err := satellite.NewRepairer(
 		log,
 		identity,
@@ -72,7 +63,6 @@ func cmdRepairerRun(cmd *cobra.Command, args []string) (err error) {
 		db.NodeEvents(),
 		db.Reputation(),
 		db.Containment(),
-		rollupsWriteCache,
 		version.Build,
 		&runCfg.Config,
 		process.AtomicLevel(cmd),

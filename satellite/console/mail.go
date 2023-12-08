@@ -19,6 +19,17 @@ func (*AccountActivationEmail) Template() string { return "Welcome" }
 // Subject gets email subject.
 func (*AccountActivationEmail) Subject() string { return "Activate your email" }
 
+// AccountActivationCodeEmail is mailservice template with activation code.
+type AccountActivationCodeEmail struct {
+	ActivationCode string
+}
+
+// Template returns email template name.
+func (*AccountActivationCodeEmail) Template() string { return "WelcomeWithCode" }
+
+// Subject gets email subject.
+func (*AccountActivationCodeEmail) Subject() string { return "Activate your email" }
+
 // ForgotPasswordEmail is mailservice template with reset password data.
 type ForgotPasswordEmail struct {
 	Origin                     string
@@ -52,6 +63,51 @@ func (*ProjectInvitationEmail) Template() string { return "Invite" }
 
 // Subject gets email subject.
 func (email *ProjectInvitationEmail) Subject() string {
+	return "You were invited to join a project on Storj"
+}
+
+// ExistingUserProjectInvitationEmail is mailservice template for project invitation email for existing users.
+type ExistingUserProjectInvitationEmail struct {
+	InviterEmail string
+	Region       string
+	SignInLink   string
+}
+
+// Template returns email template name.
+func (*ExistingUserProjectInvitationEmail) Template() string { return "ExistingUserInvite" }
+
+// Subject gets email subject.
+func (email *ExistingUserProjectInvitationEmail) Subject() string {
+	return "You were invited to join a project on Storj"
+}
+
+// UnverifiedUserProjectInvitationEmail is mailservice template for project invitation email for unverified users.
+type UnverifiedUserProjectInvitationEmail struct {
+	InviterEmail   string
+	Region         string
+	ActivationLink string
+}
+
+// Template returns email template name.
+func (*UnverifiedUserProjectInvitationEmail) Template() string { return "UnverifiedUserInvite" }
+
+// Subject gets email subject.
+func (email *UnverifiedUserProjectInvitationEmail) Subject() string {
+	return "You were invited to join a project on Storj"
+}
+
+// NewUserProjectInvitationEmail is mailservice template for project invitation email for new users.
+type NewUserProjectInvitationEmail struct {
+	InviterEmail string
+	Region       string
+	SignUpLink   string
+}
+
+// Template returns email template name.
+func (*NewUserProjectInvitationEmail) Template() string { return "NewUserInvite" }
+
+// Subject gets email subject.
+func (email *NewUserProjectInvitationEmail) Subject() string {
 	return "You were invited to join a project on Storj"
 }
 

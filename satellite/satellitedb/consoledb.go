@@ -46,12 +46,19 @@ func (db *ConsoleDB) ProjectMembers() console.ProjectMembers {
 	return &projectMembers{db.methods, db.db}
 }
 
+// ProjectInvitations is a getter for ProjectInvitations repository.
+func (db *ConsoleDB) ProjectInvitations() console.ProjectInvitations {
+	return &projectInvitations{db.methods}
+}
+
 // APIKeys is a getter for APIKeys repository.
 func (db *ConsoleDB) APIKeys() console.APIKeys {
 	db.apikeysOnce.Do(func() {
+		options := db.apikeysLRUOptions
+		options.Name = "satellitedb-apikeys"
 		db.apikeys = &apikeys{
 			methods: db.methods,
-			lru:     lrucache.New(db.apikeysLRUOptions),
+			lru:     lrucache.NewOf[*dbx.ApiKey_Project_PublicId_Row](options),
 			db:      db.db,
 		}
 	})
@@ -71,12 +78,12 @@ func (db *ConsoleDB) ResetPasswordTokens() console.ResetPasswordTokens {
 
 // WebappSessions is a getter for WebappSessions repository.
 func (db *ConsoleDB) WebappSessions() consoleauth.WebappSessions {
-	return &webappSessions{db.methods}
+	return &webappSessions{db.db}
 }
 
 // AccountFreezeEvents is a getter for AccountFreezeEvents repository.
 func (db *ConsoleDB) AccountFreezeEvents() console.AccountFreezeEvents {
-	return &accountFreezeEvents{db.methods}
+	return &accountFreezeEvents{db.db}
 }
 
 // WithTx is a method for executing and retrying transaction.

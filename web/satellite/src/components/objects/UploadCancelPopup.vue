@@ -26,59 +26,52 @@
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Vue } from 'vue-property-decorator';
+<script setup lang="ts">
+import { computed } from 'vue';
+import { useRouter } from 'vue-router';
 
-import { APP_STATE_ACTIONS } from '@/utils/constants/actionNames';
-import { AnalyticsHttpApi } from '@/api/analytics';
+import { MODALS } from '@/utils/constants/appStatePopUps';
+import { useAppStore } from '@/store/modules/appStore';
+import { useBucketsStore } from '@/store/modules/bucketsStore';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 import VButton from '@/components/common/VButton.vue';
 
 import WarningIcon from '@/../static/images/objects/cancelWarning.svg';
 
-// @vue/component
-@Component({
-    components: {
-        WarningIcon,
-        VButton,
-    },
-})
-export default class UploadCancelPopup extends Vue {
+const analyticsStore = useAnalyticsStore();
+const bucketsStore = useBucketsStore();
+const appStore = useAppStore();
+const router = useRouter();
 
-    public readonly analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
+/**
+ * Returns leave attempt's route path from store.
+ */
+const leaveRoute = computed((): string => {
+    return bucketsStore.state.leaveRoute;
+});
 
-    /**
-     * Holds on leave click logic.
-     */
-    public onLeaveClick(): void {
-        this.analytics.pageVisit(this.leaveRoute);
-        this.$router.push(this.leaveRoute);
-        this.closePopup();
-    }
+/**
+ * Holds on leave click logic.
+ */
+function onLeaveClick(): void {
+    analyticsStore.pageVisit(leaveRoute.value);
+    router.push(leaveRoute.value);
+    closePopup();
+}
 
-    /**
-     * Close upload cancel info popup.
-     */
-    public closePopup(): void {
-        this.$store.dispatch(APP_STATE_ACTIONS.TOGGLE_UPLOAD_CANCEL_POPUP);
-    }
-
-    /**
-     * Returns leave attempt's route path from store.
-     */
-    private get leaveRoute(): string {
-        return this.$store.state.objectsModule.leaveRoute;
-    }
+/**
+ * Close upload cancel info popup.
+ */
+function closePopup(): void {
+    appStore.updateActiveModal(MODALS.uploadCancelPopup);
 }
 </script>
 
 <style scoped lang="scss">
     .uc-area {
         position: fixed;
-        top: 0;
-        bottom: 0;
-        right: 0;
-        left: 0;
+        inset: 0;
         z-index: 100;
         background: rgb(27 37 51 / 75%);
         display: flex;

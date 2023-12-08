@@ -4,14 +4,17 @@
 package satellitedb_test
 
 import (
+	"database/sql"
 	"math/rand"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"storj.io/common/storj"
 	"storj.io/common/testcontext"
 	"storj.io/common/testrand"
+	"storj.io/common/uuid"
 	"storj.io/storj/satellite"
 	"storj.io/storj/satellite/console"
 	"storj.io/storj/satellite/satellitedb/satellitedbtest"
@@ -61,11 +64,12 @@ func TestUpdateUser(t *testing.T) {
 		users := db.Console().Users()
 		id := testrand.UUID()
 		u, err := users.Insert(ctx, &console.User{
-			ID:           id,
-			FullName:     "testFullName",
-			ShortName:    "testShortName",
-			Email:        "test@storj.test",
-			PasswordHash: []byte("testPasswordHash"),
+			ID:               id,
+			FullName:         "testFullName",
+			ShortName:        "testShortName",
+			Email:            "test@storj.test",
+			PasswordHash:     []byte("testPasswordHash"),
+			DefaultPlacement: 12,
 		})
 		require.NoError(t, err)
 
@@ -83,6 +87,12 @@ func TestUpdateUser(t *testing.T) {
 			MFARecoveryCodes:       []string{"code1", "code2"},
 			FailedLoginCount:       1,
 			LoginLockoutExpiration: time.Now().Truncate(time.Second),
+			DefaultPlacement:       13,
+
+			IsProfessional: true,
+			Position:       "Engineer",
+			CompanyName:    "Storj",
+			EmployeeCount:  "1-200",
 		}
 
 		require.NotEqual(t, u.FullName, newInfo.FullName)
@@ -98,6 +108,11 @@ func TestUpdateUser(t *testing.T) {
 		require.NotEqual(t, u.MFARecoveryCodes, newInfo.MFARecoveryCodes)
 		require.NotEqual(t, u.FailedLoginCount, newInfo.FailedLoginCount)
 		require.NotEqual(t, u.LoginLockoutExpiration, newInfo.LoginLockoutExpiration)
+		require.NotEqual(t, u.DefaultPlacement, newInfo.DefaultPlacement)
+		require.NotEqual(t, u.IsProfessional, newInfo.IsProfessional)
+		require.NotEqual(t, u.Position, newInfo.Position)
+		require.NotEqual(t, u.CompanyName, newInfo.CompanyName)
+		require.NotEqual(t, u.EmployeeCount, newInfo.EmployeeCount)
 
 		// update just fullname
 		updateReq := console.UpdateUserRequest{
@@ -283,6 +298,41 @@ func TestUpdateUser(t *testing.T) {
 
 		u.LoginLockoutExpiration = newInfo.LoginLockoutExpiration
 		require.Equal(t, u, updatedUser)
+
+		// update just the placement
+		defaultPlacement := &newInfo.DefaultPlacement
+		updateReq = console.UpdateUserRequest{
+			DefaultPlacement: *defaultPlacement,
+		}
+
+		err = users.Update(ctx, id, updateReq)
+		require.NoError(t, err)
+
+		updatedUser, err = users.Get(ctx, id)
+		require.NoError(t, err)
+
+		u.DefaultPlacement = newInfo.DefaultPlacement
+		require.Equal(t, u, updatedUser)
+
+		// update professional info
+		updateReq = console.UpdateUserRequest{
+			IsProfessional: &newInfo.IsProfessional,
+			Position:       &newInfo.Position,
+			CompanyName:    &newInfo.CompanyName,
+			EmployeeCount:  &newInfo.EmployeeCount,
+		}
+
+		err = users.Update(ctx, id, updateReq)
+		require.NoError(t, err)
+
+		updatedUser, err = users.Get(ctx, id)
+		require.NoError(t, err)
+
+		u.IsProfessional = newInfo.IsProfessional
+		u.Position = newInfo.Position
+		u.CompanyName = newInfo.CompanyName
+		u.EmployeeCount = newInfo.EmployeeCount
+		require.Equal(t, u, updatedUser)
 	})
 }
 
@@ -307,5 +357,158 @@ func TestUpdateUserProjectLimits(t *testing.T) {
 		require.Equal(t, limits.Bandwidth, user.ProjectBandwidthLimit)
 		require.Equal(t, limits.Storage, user.ProjectStorageLimit)
 		require.Equal(t, limits.Segment, user.ProjectSegmentLimit)
+	})
+}
+
+func TestUpdateDefaultPlacement(t *testing.T) {
+	satellitedbtest.Run(t, func(ctx *testcontext.Context, t *testing.T, db satellite.DB) {
+		usersRepo := db.Console().Users()
+
+		user, err := usersRepo.Insert(ctx, &console.User{
+			ID:           testrand.UUID(),
+			FullName:     "User",
+			Email:        "test@mail.test",
+			PasswordHash: []byte("123a123"),
+		})
+		require.NoError(t, err)
+
+		err = usersRepo.UpdateDefaultPlacement(ctx, user.ID, 12)
+		require.NoError(t, err)
+
+		user, err = usersRepo.Get(ctx, user.ID)
+		require.NoError(t, err)
+		require.Equal(t, storj.PlacementConstraint(12), user.DefaultPlacement)
+
+		err = usersRepo.UpdateDefaultPlacement(ctx, user.ID, storj.EveryCountry)
+		require.NoError(t, err)
+
+		user, err = usersRepo.Get(ctx, user.ID)
+		require.NoError(t, err)
+		require.Equal(t, storj.EveryCountry, user.DefaultPlacement)
+	})
+}
+
+func TestUserSettings(t *testing.T) {
+	satellitedbtest.Run(t, func(ctx *testcontext.Context, t *testing.T, db satellite.DB) {
+		users := db.Console().Users()
+		id := testrand.UUID()
+		sessionDur := time.Duration(rand.Int63()).Round(time.Minute)
+		sessionDurPtr := &sessionDur
+		var nilDur *time.Duration
+
+		_, err := users.GetSettings(ctx, id)
+		require.ErrorIs(t, err, sql.ErrNoRows)
+
+		for _, tt := range []struct {
+			name     string
+			upserted **time.Duration
+			expected *time.Duration
+		}{
+			{"update when given pointer to non-nil value", &sessionDurPtr, sessionDurPtr},
+			{"ignore when given nil pointer", nil, sessionDurPtr},
+			{"nullify when given pointer to nil", &nilDur, nil},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				require.NoError(t, users.UpsertSettings(ctx, id, console.UpsertUserSettingsRequest{
+					SessionDuration: tt.upserted,
+				}))
+				settings, err := users.GetSettings(ctx, id)
+				require.NoError(t, err)
+				require.Equal(t, tt.expected, settings.SessionDuration)
+			})
+		}
+
+		t.Run("test onboarding", func(t *testing.T) {
+			id = testrand.UUID()
+			require.NoError(t, users.UpsertSettings(ctx, id, console.UpsertUserSettingsRequest{}))
+			settings, err := users.GetSettings(ctx, id)
+			require.NoError(t, err)
+			require.False(t, settings.OnboardingStart)
+			require.False(t, settings.OnboardingEnd)
+			require.Nil(t, settings.OnboardingStep)
+
+			newBool := true
+			newStep := "Overview"
+			require.NoError(t, users.UpsertSettings(ctx, id, console.UpsertUserSettingsRequest{
+				OnboardingStart: &newBool,
+				OnboardingEnd:   &newBool,
+				OnboardingStep:  &newStep,
+			}))
+			settings, err = users.GetSettings(ctx, id)
+			require.NoError(t, err)
+			require.Equal(t, newBool, settings.OnboardingStart)
+			require.Equal(t, newBool, settings.OnboardingEnd)
+			require.Equal(t, &newStep, settings.OnboardingStep)
+		})
+
+		t.Run("test passphrase prompt", func(t *testing.T) {
+			id = testrand.UUID()
+			require.NoError(t, users.UpsertSettings(ctx, id, console.UpsertUserSettingsRequest{}))
+			settings, err := users.GetSettings(ctx, id)
+			require.NoError(t, err)
+			require.True(t, settings.PassphrasePrompt)
+
+			newBool := false
+			require.NoError(t, users.UpsertSettings(ctx, id, console.UpsertUserSettingsRequest{
+				PassphrasePrompt: &newBool,
+			}))
+			settings, err = users.GetSettings(ctx, id)
+			require.NoError(t, err)
+			require.Equal(t, newBool, settings.PassphrasePrompt)
+
+			require.NoError(t, users.UpsertSettings(ctx, id, console.UpsertUserSettingsRequest{}))
+			settings, err = users.GetSettings(ctx, id)
+			require.NoError(t, err)
+			require.Equal(t, newBool, settings.PassphrasePrompt)
+		})
+	})
+}
+
+func TestDeleteUnverifiedBefore(t *testing.T) {
+	maxUnverifiedAge := time.Hour
+	now := time.Now()
+	expiration := now.Add(-maxUnverifiedAge)
+
+	satellitedbtest.Run(t, func(ctx *testcontext.Context, t *testing.T, db satellite.DB) {
+		usersDB := db.Console().Users()
+		now := time.Now()
+
+		// Only positive page sizes should be allowed.
+		require.Error(t, usersDB.DeleteUnverifiedBefore(ctx, time.Time{}, 0, 0))
+		require.Error(t, usersDB.DeleteUnverifiedBefore(ctx, time.Time{}, 0, -1))
+
+		createUser := func(status console.UserStatus, createdAt time.Time) uuid.UUID {
+			user, err := usersDB.Insert(ctx, &console.User{
+				ID:           testrand.UUID(),
+				PasswordHash: testrand.Bytes(8),
+			})
+			require.NoError(t, err)
+
+			result, err := db.Testing().RawDB().ExecContext(ctx,
+				"UPDATE users SET created_at = $1, status = $2 WHERE id = $3",
+				createdAt, status, user.ID,
+			)
+			require.NoError(t, err)
+
+			count, err := result.RowsAffected()
+			require.NoError(t, err)
+			require.EqualValues(t, 1, count)
+
+			return user.ID
+		}
+
+		oldActive := createUser(console.Active, expiration.Add(-time.Second))
+		newUnverified := createUser(console.Inactive, now)
+		oldUnverified := createUser(console.Inactive, expiration.Add(-time.Second))
+
+		require.NoError(t, usersDB.DeleteUnverifiedBefore(ctx, expiration, 0, 1))
+
+		// Ensure that the old, unverified user record was deleted and the others remain.
+		_, err := usersDB.Get(ctx, oldUnverified)
+		require.ErrorIs(t, err, sql.ErrNoRows)
+		_, err = usersDB.Get(ctx, newUnverified)
+		require.NoError(t, err)
+		_, err = usersDB.Get(ctx, oldActive)
+		require.NoError(t, err)
 	})
 }

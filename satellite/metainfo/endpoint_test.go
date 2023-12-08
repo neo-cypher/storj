@@ -96,7 +96,7 @@ func TestEndpoint_NoStorageNodes(t *testing.T) {
 			_, err = client.ListBuckets(ctx, metaclient.ListBucketsParams{
 				ListOpts: metaclient.BucketListOptions{
 					Cursor:    "",
-					Direction: storj.Forward,
+					Direction: metaclient.Forward,
 					Limit:     10,
 				},
 			})
@@ -215,6 +215,27 @@ func TestEndpoint_NoStorageNodes(t *testing.T) {
 					assertInvalidArgument(t, err, false)
 
 					_, err = client.GetBucket(ctx, metaclient.GetBucketParams{})
+					assertInvalidArgument(t, err, false)
+
+					_, err = planet.Satellites[0].Metainfo.Endpoint.GetBucketLocation(ctx, &pb.GetBucketLocationRequest{
+						Header: &pb.RequestHeader{
+							ApiKey: []byte(invalidAPIKey),
+						},
+					})
+					assertInvalidArgument(t, err, false)
+
+					_, err = planet.Satellites[0].Metainfo.Endpoint.GetBucketVersioning(ctx, &pb.GetBucketVersioningRequest{
+						Header: &pb.RequestHeader{
+							ApiKey: []byte(invalidAPIKey),
+						},
+					})
+					assertInvalidArgument(t, err, false)
+
+					_, err = planet.Satellites[0].Metainfo.Endpoint.SetBucketVersioning(ctx, &pb.SetBucketVersioningRequest{
+						Header: &pb.RequestHeader{
+							ApiKey: []byte(invalidAPIKey),
+						},
+					})
 					assertInvalidArgument(t, err, false)
 
 					_, err = client.GetObject(ctx, metaclient.GetObjectParams{})

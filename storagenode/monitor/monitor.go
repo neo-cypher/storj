@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
+	"storj.io/common/errs2"
 	"storj.io/common/memory"
 	"storj.io/common/pb"
 	"storj.io/common/sync2"
@@ -31,12 +32,18 @@ var (
 
 // DiskSpace consolidates monitored disk space statistics.
 type DiskSpace struct {
-	Allocated     int64
+	// Allocated is the amount of disk space allocated to the storage node, in bytes.
+	Allocated int64
+	// UsedForPieces is the amount of disk space used for pieces, in bytes.
 	UsedForPieces int64
-	UsedForTrash  int64
-	Free          int64
-	Available     int64
-	Overused      int64
+	// UsedForTrash is the amount of disk space used for trash, in bytes.
+	UsedForTrash int64
+	// Free is the actual amount of free space on the whole disk, not just allocated disk space, in bytes.
+	Free int64
+	// Available is the amount of free space on the allocated disk space, in bytes.
+	Available int64
+	// Overused is the amount of disk space overused by the storage node, in bytes.
+	Overused int64
 }
 
 // Config defines parameters for storage node disk and bandwidth usage monitoring.
@@ -44,6 +51,9 @@ type Config struct {
 	Interval                  time.Duration `help:"how frequently Kademlia bucket should be refreshed with node stats" default:"1h0m0s"`
 	VerifyDirReadableInterval time.Duration `help:"how frequently to verify the location and readability of the storage directory" releaseDefault:"1m" devDefault:"30s"`
 	VerifyDirWritableInterval time.Duration `help:"how frequently to verify writability of storage directory" releaseDefault:"5m" devDefault:"30s"`
+	VerifyDirReadableTimeout  time.Duration `help:"how long to wait for a storage directory readability verification to complete" releaseDefault:"1m" devDefault:"10s"`
+	VerifyDirWritableTimeout  time.Duration `help:"how long to wait for a storage directory writability verification to complete" releaseDefault:"1m" devDefault:"10s"`
+	VerifyDirWarnOnly         bool          `help:"if the storage directory verification check fails, log a warning instead of killing the node" default:"false"`
 	MinimumDiskSpace          memory.Size   `help:"how much disk space a node at minimum has to advertise" default:"500GB"`
 	MinimumBandwidth          memory.Size   `help:"how much bandwidth a node at minimum has to advertise (deprecated)" default:"0TB"`
 	NotifyLowDiskCooldown     time.Duration `help:"minimum length of time between capacity reports" default:"10m" hidden:"true"`
@@ -127,18 +137,48 @@ func (service *Service) Run(ctx context.Context) (err error) {
 
 	group, ctx := errgroup.WithContext(ctx)
 	group.Go(func() error {
+		timeout := service.Config.VerifyDirReadableTimeout
 		return service.VerifyDirReadableLoop.Run(ctx, func(ctx context.Context) error {
-			err := service.store.VerifyStorageDir(ctx, service.contact.Local().ID)
+			err := service.store.VerifyStorageDirWithTimeout(ctx, service.contact.Local().ID, timeout)
 			if err != nil {
+				if errs2.IsCanceled(err) {
+					return nil
+				}
+				if errs.Is(err, context.DeadlineExceeded) {
+					if service.Config.VerifyDirWarnOnly {
+						service.log.Error("timed out while verifying readability of storage directory", zap.Duration("timeout", timeout))
+						return nil
+					}
+					return Error.New("timed out after %v while verifying readability of storage directory", timeout)
+				}
+				if service.Config.VerifyDirWarnOnly {
+					service.log.Error("error verifying location and/or readability of storage directory", zap.Error(err))
+					return nil
+				}
 				return Error.New("error verifying location and/or readability of storage directory: %v", err)
 			}
 			return nil
 		})
 	})
 	group.Go(func() error {
+		timeout := service.Config.VerifyDirWritableTimeout
 		return service.VerifyDirWritableLoop.Run(ctx, func(ctx context.Context) error {
-			err := service.store.CheckWritability(ctx)
+			err := service.store.CheckWritabilityWithTimeout(ctx, timeout)
 			if err != nil {
+				if errs2.IsCanceled(err) {
+					return nil
+				}
+				if errs.Is(err, context.DeadlineExceeded) {
+					if service.Config.VerifyDirWarnOnly {
+						service.log.Error("timed out while verifying writability of storage directory", zap.Duration("timeout", timeout))
+						return nil
+					}
+					return Error.New("timed out after %v while verifying writability of storage directory", timeout)
+				}
+				if service.Config.VerifyDirWarnOnly {
+					service.log.Error("error verifying writability of storage directory", zap.Error(err))
+					return nil
+				}
 				return Error.New("error verifying writability of storage directory: %v", err)
 			}
 			return nil

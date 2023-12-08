@@ -67,7 +67,7 @@ func (usage *Service) ExceedsBandwidthUsage(ctx context.Context, projectID uuid.
 
 	group.Go(func() error {
 		var err error
-		limit, err = usage.projectLimitCache.GetProjectBandwidthLimit(ctx, projectID)
+		limit, err = usage.projectLimitCache.GetBandwidthLimit(ctx, projectID)
 		return err
 	})
 	group.Go(func() error {
@@ -128,7 +128,7 @@ func (usage *Service) ExceedsUploadLimits(
 
 	group.Go(func() error {
 		var err error
-		limits, err := usage.projectLimitCache.GetProjectLimits(ctx, projectID)
+		limits, err := usage.projectLimitCache.GetLimits(ctx, projectID)
 		if err != nil {
 			return err
 		}
@@ -169,7 +169,7 @@ func (usage *Service) ExceedsUploadLimits(
 func (usage *Service) AddProjectUsageUpToLimit(ctx context.Context, projectID uuid.UUID, storage int64, segments int64) (err error) {
 	defer mon.Task()(&ctx, projectID)(&err)
 
-	limits, err := usage.projectLimitCache.GetProjectLimits(ctx, projectID)
+	limits, err := usage.projectLimitCache.GetLimits(ctx, projectID)
 	if err != nil {
 		return err
 	}
@@ -218,6 +218,29 @@ func (usage *Service) GetProjectBandwidthTotals(ctx context.Context, projectID u
 	return total, ErrProjectUsage.Wrap(err)
 }
 
+// GetProjectSettledBandwidth returns total amount of settled bandwidth used for past 30 days.
+func (usage *Service) GetProjectSettledBandwidth(ctx context.Context, projectID uuid.UUID) (_ int64, err error) {
+	defer mon.Task()(&ctx, projectID)(&err)
+
+	// from the beginning of the current month
+	year, month, _ := usage.nowFn().Date()
+
+	total, err := usage.projectAccountingDB.GetProjectSettledBandwidth(ctx, projectID, year, month, usage.asOfSystemInterval)
+	return total, ErrProjectUsage.Wrap(err)
+}
+
+// GetProjectSegmentTotals returns total amount of allocated segments used for past 30 days.
+func (usage *Service) GetProjectSegmentTotals(ctx context.Context, projectID uuid.UUID) (total int64, err error) {
+	defer mon.Task()(&ctx, projectID)(&err)
+
+	total, err = usage.liveAccounting.GetProjectSegmentUsage(ctx, projectID)
+	if ErrKeyNotFound.Has(err) {
+		return 0, nil
+	}
+
+	return total, ErrProjectUsage.Wrap(err)
+}
+
 // GetProjectBandwidth returns project allocated bandwidth for the specified year, month and day.
 func (usage *Service) GetProjectBandwidth(ctx context.Context, projectID uuid.UUID, year int, month time.Month, day int) (_ int64, err error) {
 	defer mon.Task()(&ctx, projectID)(&err)
@@ -229,7 +252,7 @@ func (usage *Service) GetProjectBandwidth(ctx context.Context, projectID uuid.UU
 // GetProjectStorageLimit returns current project storage limit.
 func (usage *Service) GetProjectStorageLimit(ctx context.Context, projectID uuid.UUID) (_ memory.Size, err error) {
 	defer mon.Task()(&ctx, projectID)(&err)
-	limits, err := usage.projectLimitCache.GetProjectLimits(ctx, projectID)
+	limits, err := usage.projectLimitCache.GetLimits(ctx, projectID)
 	if err != nil {
 		return 0, ErrProjectUsage.Wrap(err)
 	}
@@ -240,7 +263,13 @@ func (usage *Service) GetProjectStorageLimit(ctx context.Context, projectID uuid
 // GetProjectBandwidthLimit returns current project bandwidth limit.
 func (usage *Service) GetProjectBandwidthLimit(ctx context.Context, projectID uuid.UUID) (_ memory.Size, err error) {
 	defer mon.Task()(&ctx, projectID)(&err)
-	return usage.projectLimitCache.GetProjectBandwidthLimit(ctx, projectID)
+	return usage.projectLimitCache.GetBandwidthLimit(ctx, projectID)
+}
+
+// GetProjectSegmentLimit returns current project segment limit.
+func (usage *Service) GetProjectSegmentLimit(ctx context.Context, projectID uuid.UUID) (_ memory.Size, err error) {
+	defer mon.Task()(&ctx, projectID)(&err)
+	return usage.projectLimitCache.GetSegmentLimit(ctx, projectID)
 }
 
 // UpdateProjectLimits sets new value for project's bandwidth and storage limit.
@@ -300,4 +329,9 @@ func (usage *Service) AddProjectStorageUsage(ctx context.Context, projectID uuid
 // SetNow allows tests to have the Service act as if the current time is whatever they want.
 func (usage *Service) SetNow(now func() time.Time) {
 	usage.nowFn = now
+}
+
+// TestSetAsOfSystemInterval allows tests to set Service asOfSystemInterval value.
+func (usage *Service) TestSetAsOfSystemInterval(asOfSystemInterval time.Duration) {
+	usage.asOfSystemInterval = asOfSystemInterval
 }

@@ -7,22 +7,32 @@
         :class="{ 'selected': selected }"
         @click="onClick"
     >
-        <th v-if="selectable" class="icon select">
-            <v-table-checkbox :disabled="selectDisabled" :value="selected" @checkChange="onChange" />
+        <th v-if="selectable" class="icon select" @click.stop="selectClicked">
+            <v-table-checkbox v-if="!selectHidden" :disabled="selectDisabled || selectHidden" :value="selected" @selectClicked="selectClicked" />
         </th>
         <th
-            v-for="(val, _, index) in item" :key="index" class="align-left data"
+            v-for="(val, keyVal, index) in item" :key="index" class="align-left data"
             :class="{'overflow-visible': showBucketGuide(index)}"
         >
-            <div v-if="Array.isArray(val)" class="few-items">
-                <p v-for="str in val" :key="str" class="array-val">{{ str }}</p>
+            <div v-if="Array.isArray(val)" class="few-items-container">
+                <div v-if="icon && index === 0 && itemType?.includes('project')" class="item-icon file-background" :class="customIconClasses">
+                    <component :is="icon" />
+                </div>
+                <div class="few-items">
+                    <p v-for="str in val" :key="str" class="array-val">{{ str }}</p>
+                </div>
             </div>
             <div v-else class="table-item">
-                <BucketIcon v-if="(tableType.toLowerCase() === 'bucket') && (index === 0)" class="item-icon" />
-                <FileIcon v-else-if="(tableType.toLowerCase() === 'file') && (index === 0)" class="item-icon" />
-                <FolderIcon v-else-if="(tableType.toLowerCase() === 'folder') && (index === 0)" class="item-icon" />
-                <p :class="{primary: index === 0}" @click.stop="(e) => cellContentClicked(index, e)">
-                    <middle-truncate v-if="(tableType.toLowerCase() === 'file')" :text="val" />
+                <div v-if="icon && index === 0" class="item-icon file-background" :class="customIconClasses">
+                    <component :is="icon" />
+                </div>
+                <p v-if="keyVal === 'multi'" class="multi" :class="{primary: index === 0}" :title="val['title']" @click.stop="(e) => cellContentClicked(index, e)">
+                    <span class="multi__title">{{ val['title'] }}</span>
+                    <span class="multi__subtitle">{{ val['subtitle'] }}</span>
+                </p>
+                <p v-else :class="{primary: index === 0}" :title="val" @click.stop="(e) => cellContentClicked(index, e)">
+                    <middle-truncate v-if="keyVal === 'fileName'" :text="val" />
+                    <project-ownership-tag v-else-if="keyVal === 'role'" :no-icon="!isProjectRoleIconShown(val)" :role="val" />
                     <span v-else>{{ val }}</span>
                 </p>
                 <div v-if="showBucketGuide(index)" class="animation">
@@ -36,45 +46,65 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue';
+
+import { ProjectRole } from '@/types/projectMembers';
+import { ObjectType } from '@/utils/objectIcon';
+
 import VTableCheckbox from '@/components/common/VTableCheckbox.vue';
 import BucketGuide from '@/components/objects/BucketGuide.vue';
 import MiddleTruncate from '@/components/browser/MiddleTruncate.vue';
-
-import FolderIcon from '@/../static/images/objects/folder.svg';
-import BucketIcon from '@/../static/images/objects/bucketIcon.svg';
-import FileIcon from '@/../static/images/objects/file.svg';
+import ProjectOwnershipTag from '@/components/project/ProjectOwnershipTag.vue';
 
 const props = withDefaults(defineProps<{
     selectDisabled?: boolean;
+    selectHidden?: boolean;
     selected?: boolean;
     selectable?: boolean;
     showGuide?: boolean;
-    tableType?: string;
+    itemType?: string;
     item?: object;
     onClick?: (data?: unknown) => void;
-    // event for the first cell of this item.
     hideGuide?: () => void;
+    // event for the first cell of this item.
     onPrimaryClick?: (data?: unknown) => void;
 }>(), {
     selectDisabled: false,
+    selectHidden: false,
     selected: false,
     selectable: false,
     showGuide: false,
-    tableType: 'none',
+    itemType: 'none',
     item: () => ({}),
     onClick: () => {},
     hideGuide: () => {},
-    onPrimaryClick: null,
+    onPrimaryClick: undefined,
 });
 
-const emit = defineEmits(['selectChange']);
+const emit = defineEmits(['selectClicked']);
 
-function onChange(value: boolean): void {
-    emit('selectChange', value);
+const icon = computed((): string => ObjectType.findIcon(props.itemType));
+
+const customIconClasses = computed(() => {
+    const classes = {};
+    if (props.itemType === 'project') {
+        classes['project-owner'] = true;
+    } else if (props.itemType === 'shared-project') {
+        classes['project-member'] = true;
+    }
+    return classes;
+});
+
+function isProjectRoleIconShown(role: ProjectRole) {
+    return props.itemType.includes('project') || role === ProjectRole.Invited || role === ProjectRole.InviteExpired;
+}
+
+function selectClicked(event: Event): void {
+    emit('selectClicked', event);
 }
 
 function showBucketGuide(index: number): boolean {
-    return (props.tableType.toLowerCase() === 'bucket') && (index === 0) && props.showGuide;
+    return (props.itemType?.toLowerCase() === 'bucket') && (index === 0) && props.showGuide;
 }
 
 function cellContentClicked(cellIndex: number, event: Event) {
@@ -83,7 +113,9 @@ function cellContentClicked(cellIndex: number, event: Event) {
         return;
     }
     // trigger default item onClick instead.
-    props.onClick();
+    if (props.onClick) {
+        props.onClick();
+    }
 }
 </script>
 
@@ -147,19 +179,55 @@ function cellContentClicked(cellIndex: number, event: Event) {
     tr {
         cursor: pointer;
 
-        &:hover .table-item .primary {
-            color: #0149ff;
-        }
+        &:hover {
+            background: var(--c-grey-1);
 
-        &:hover .table-item {
+            .table-item {
 
-            svg :deep(path) {
-                fill: var(--c-blue-3);
+                .primary {
+                    color: var(--c-blue-3);
+
+                    & > .multi__subtitle {
+                        color: var(--c-blue-3);
+                    }
+                }
             }
         }
 
         &.selected {
-            background: #f0f3f8;
+            background: var(--c-yellow-1);
+
+            :deep(.select) {
+                background: var(--c-yellow-1);
+            }
+        }
+    }
+
+    .multi {
+        display: flex;
+        flex-direction: column;
+
+        &__title {
+            text-overflow: ellipsis;
+            overflow: hidden;
+        }
+
+        &__subtitle {
+            font-family: 'font_regular', sans-serif;
+            font-size: 12px;
+            line-height: 20px;
+            color: var(--c-grey-6);
+            text-overflow: ellipsis;
+            overflow: hidden;
+        }
+    }
+
+    .few-items-container {
+        display: flex;
+        align-items: center;
+
+        @media screen and (width <= 370px) {
+            max-width: 9rem;
         }
     }
 
@@ -193,5 +261,31 @@ function cellContentClicked(cellIndex: number, event: Event) {
     .item-icon {
         margin-right: 12px;
         min-width: 18px;
+    }
+
+    .file-background {
+        background: var(--c-white);
+        border: 1px solid var(--c-grey-2);
+        padding: 2px;
+        border-radius: 8px;
+        height: 32px;
+        min-width: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .project-owner {
+
+        :deep(path) {
+            fill: var(--c-purple-4);
+        }
+    }
+
+    .project-member {
+
+        :deep(path) {
+            fill: var(--c-yellow-5);
+        }
     }
 </style>

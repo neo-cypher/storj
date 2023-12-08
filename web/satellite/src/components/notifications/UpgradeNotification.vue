@@ -3,111 +3,104 @@
 
 <template>
     <div v-if="isBannerShowing" class="notification-wrap">
-        <div class="notification-wrap__content">
-            <div class="notification-wrap__content__left">
-                <SunnyIcon class="notification-wrap__content__left__icon" />
-                <p>Ready to upgrade? Upload up to 75TB and pay what you use only, no minimum. 150GB free included.</p>
-            </div>
-            <div class="notification-wrap__content__right">
-                <a @click="openBanner">Upgrade Now</a>
-                <CloseIcon class="notification-wrap__content__right__close" @click="onCloseClick" />
-            </div>
+        <SunnyIcon class="notification-wrap__icon" />
+        <div class="notification-wrap__text">
+            <p>
+                Ready to upgrade? Increase your limits and only pay for what you use - no minimum.
+                {{ formattedStorageLimit }} free still included.
+            </p>
+            <a @click="openBanner">Upgrade Now</a>
         </div>
+        <CloseIcon class="notification-wrap__close" @click="onCloseClick" />
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Prop, Vue } from 'vue-property-decorator';
+<script setup lang="ts">
+import { computed, ref } from 'vue';
 
 import { AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
-import { AnalyticsHttpApi } from '@/api/analytics';
-import { AB_TESTING_ACTIONS } from '@/store/modules/abTesting';
-import { ABHitAction } from '@/types/abtesting';
+import { useUsersStore } from '@/store/modules/usersStore';
+import { Size } from '@/utils/bytesSize';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 import SunnyIcon from '@/../static/images/notifications/sunnyicon.svg';
 import CloseIcon from '@/../static/images/notifications/closeSmall.svg';
 
-// @vue/component
-@Component({
-    components: {
-        CloseIcon,
-        SunnyIcon,
-    },
-})
-export default class UpgradeNotification extends Vue {
-    @Prop({ default: () => () => false })
-    public readonly openAddPMModal: () => void;
-    private readonly analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
+const props = defineProps<{
+    openAddPMModal: () => void,
+}>();
 
-    public isBannerShowing = true;
+const analyticsStore = useAnalyticsStore();
+const usersStore = useUsersStore();
 
-    /**
-     * Closes notification.
-     */
-    public onCloseClick(): void {
-        this.isBannerShowing = false;
-    }
+const isBannerShowing = ref<boolean>(true);
 
-    // Send analytics event to segment when Upgrade Account banner is clicked.
-    public async openBanner(): Promise<void> {
-        this.openAddPMModal();
-        await this.analytics.eventTriggered(AnalyticsEvent.UPGRADE_BANNER_CLICKED);
-        await this.$store.dispatch(AB_TESTING_ACTIONS.HIT, ABHitAction.UPGRADE_ACCOUNT_CLICKED);
-    }
+/**
+ * Closes notification.
+ */
+function onCloseClick(): void {
+    isBannerShowing.value = false;
+}
+
+/**
+ * Returns the user's project storage limit from the store formatted as a size string.
+ */
+const formattedStorageLimit = computed((): string => {
+    return Size.toBase10String(usersStore.state.user.projectStorageLimit);
+});
+
+/**
+ * Send analytics event to segment when Upgrade Account banner is clicked.
+ */
+async function openBanner(): Promise<void> {
+    props.openAddPMModal();
+    analyticsStore.eventTriggered(AnalyticsEvent.UPGRADE_BANNER_CLICKED);
 }
 </script>
 
 <style scoped lang="scss">
-    .notification-wrap {
-        position: relative;
+.notification-wrap {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 16px;
+    font-family: 'font_regular', sans-serif;
+    font-size: 1rem;
+    background-color: var(--c-white);
+    border: 1px solid var(--c-blue-2);
+    border-radius: 10px;
+    box-shadow: 0 7px 20px rgba(0 0 0 / 15%);
 
-        &__content {
-            position: absolute;
-            left: 40px;
-            right: 44px;
-            top: 5px;
-            z-index: 9999;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 20px;
-            font-family: 'font_regular', sans-serif;
-            font-size: 14px;
-            background-color: #fff;
-            border: 1px solid #d8dee3;
-            border-radius: 16px;
-            box-shadow: 0 7px 20px rgba(0 0 0 / 15%);
+    &__icon {
+        flex-shrink: 0;
+    }
 
-            &__left {
-                display: flex;
-                align-items: center;
+    &__text {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-grow: 1;
 
-                & b {
-                    font-family: 'font_medium', sans-serif;
-                }
+        & a {
+            color: var(--c-black);
+            text-decoration: underline !important;
+            white-space: nowrap;
+        }
 
-                &__icon {
-                    flex-shrink: 0;
-                    margin-right: 16px;
-                }
-            }
-
-            &__right {
-                display: flex;
-                align-items: center;
-                flex-shrink: 0;
-                margin-left: 16px;
-
-                & a {
-                    color: black;
-                    text-decoration: underline !important;
-                }
-
-                &__close {
-                    margin-left: 16px;
-                    cursor: pointer;
-                }
-            }
+        @media screen and (width <= 500px) {
+            flex-direction: column;
+            align-items: flex-start;
         }
     }
+
+    &__close {
+        flex-shrink: 0;
+        cursor: pointer;
+    }
+
+    @media screen and (width <= 500px) {
+        align-items: flex-start;
+    }
+}
 </style>

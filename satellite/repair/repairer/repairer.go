@@ -5,17 +5,21 @@ package repairer
 
 import (
 	"context"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spacemonkeygo/monkit/v3"
+	"github.com/spf13/pflag"
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 	"golang.org/x/sync/semaphore"
 
 	"storj.io/common/memory"
+	"storj.io/common/storj"
 	"storj.io/common/sync2"
 	"storj.io/storj/satellite/repair/queue"
-	"storj.io/storj/storage"
 )
 
 // Error is a standard error class for this package.
@@ -28,6 +32,7 @@ var (
 type Config struct {
 	MaxRepair                     int           `help:"maximum segments that can be repaired concurrently" releaseDefault:"5" devDefault:"1" testDefault:"10"`
 	Interval                      time.Duration `help:"how frequently repairer should try and repair more data" releaseDefault:"5m0s" devDefault:"1m0s" testDefault:"$TESTINTERVAL"`
+	DialTimeout                   time.Duration `help:"time limit for dialing storage node" default:"5s"`
 	Timeout                       time.Duration `help:"time limit for uploading repaired pieces to new storage nodes" default:"5m0s" testDefault:"1m"`
 	DownloadTimeout               time.Duration `help:"time limit for downloading pieces from a node for repair" default:"5m0s" testDefault:"1m"`
 	TotalTimeout                  time.Duration `help:"time limit for an entire repair job, from queue pop to upload completion" default:"45m" testDefault:"10m"`
@@ -35,8 +40,52 @@ type Config struct {
 	MaxExcessRateOptimalThreshold float64       `help:"ratio applied to the optimal threshold to calculate the excess of the maximum number of repaired pieces to upload" default:"0.05"`
 	InMemoryRepair                bool          `help:"whether to download pieces for repair in memory (true) or download to disk (false)" default:"false"`
 	ReputationUpdateEnabled       bool          `help:"whether the audit score of nodes should be updated as a part of repair" default:"false"`
-	UseRangedLoop                 bool          `help:"whether to use ranged loop instead of segment loop" default:"false"`
+	UseRangedLoop                 bool          `help:"whether to enable repair checker observer with ranged loop" default:"true"`
+	RepairExcludedCountryCodes    []string      `help:"list of country codes to treat node from this country as offline" default:"" hidden:"true"`
+	DoDeclumping                  bool          `help:"repair pieces on the same network to other nodes" default:"true"`
+	DoPlacementCheck              bool          `help:"repair pieces out of segment placement" default:"true"`
+
+	IncludedPlacements PlacementList `help:"comma separated placement IDs (numbers), which should checked by the repairer (other placements are ignored)" default:""`
+	ExcludedPlacements PlacementList `help:"comma separated placement IDs (numbers), placements which should be ignored by the repairer" default:""`
 }
+
+// PlacementList is a configurable, comma separated list of PlacementConstraint IDs.
+type PlacementList struct {
+	Placements []storj.PlacementConstraint
+}
+
+// String implements pflag.Value.
+func (p *PlacementList) String() string {
+	var s []string
+	for _, pl := range p.Placements {
+		s = append(s, fmt.Sprintf("%d", pl))
+	}
+	return strings.Join(s, ",")
+}
+
+// Set implements pflag.Value.
+func (p *PlacementList) Set(s string) error {
+	parts := strings.Split(s, ",")
+	for _, pNumStr := range parts {
+		pNumStr = strings.TrimSpace(pNumStr)
+		if pNumStr == "" {
+			continue
+		}
+		pNum, err := strconv.Atoi(pNumStr)
+		if err != nil {
+			return errs.New("Placement list should contain numbers: %s", s)
+		}
+		p.Placements = append(p.Placements, storj.PlacementConstraint(pNum))
+	}
+	return nil
+}
+
+// Type implements pflag.Value.
+func (p PlacementList) Type() string {
+	return "placement-list"
+}
+
+var _ pflag.Value = &PlacementList{}
 
 // Service contains the information needed to run the repair service.
 //
@@ -83,6 +132,12 @@ func (service *Service) WaitForPendingRepairs() {
 	service.JobLimiter.Release(int64(service.config.MaxRepair))
 }
 
+// TestingSetMinFailures sets the minFailures attribute, which tells the Repair machinery that we _expect_
+// there to be failures and that we should wait for them if necessary. This is only used in tests.
+func (service *Service) TestingSetMinFailures(minFailures int) {
+	service.repairer.ec.TestingSetMinFailures(minFailures)
+}
+
 // Run runs the repairer service.
 func (service *Service) Run(ctx context.Context) (err error) {
 	defer mon.Task()(&ctx)(&err)
@@ -99,7 +154,7 @@ func (service *Service) processWhileQueueHasItems(ctx context.Context) error {
 	for {
 		err := service.process(ctx)
 		if err != nil {
-			if storage.ErrEmptyQueue.Has(err) {
+			if queue.ErrEmpty.Has(err) {
 				return nil
 			}
 			service.log.Error("process", zap.Error(Error.Wrap(err)))
@@ -129,7 +184,7 @@ func (service *Service) process(ctx context.Context) (err error) {
 	// return from service.Run when queue fetch fails.
 	ctx, cancel := context.WithTimeout(ctx, service.config.TotalTimeout)
 
-	seg, err := service.queue.Select(ctx)
+	seg, err := service.queue.Select(ctx, service.config.IncludedPlacements.Placements, service.config.ExcludedPlacements.Placements)
 	if err != nil {
 		service.JobLimiter.Release(1)
 		cancel()
@@ -142,7 +197,6 @@ func (service *Service) process(ctx context.Context) (err error) {
 	go func() {
 		defer service.JobLimiter.Release(1)
 		defer cancel()
-
 		if err := service.worker(ctx, seg); err != nil {
 			service.log.Error("repair worker failed:", zap.Error(err))
 		}

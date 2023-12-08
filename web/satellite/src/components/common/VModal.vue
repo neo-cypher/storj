@@ -2,11 +2,11 @@
 // See LICENSE for copying information.
 
 <template>
-    <div ref="modal" class="mask" tabindex="0" @keydown.esc="onClose">
-        <div class="mask__wrapper" @click.self="onClose">
+    <div ref="modal" class="mask" tabindex="0" @keydown.esc="closeHandler">
+        <div class="mask__wrapper" @click.self="closeHandler">
             <div class="mask__wrapper__container">
                 <slot name="content" />
-                <div class="mask__wrapper__container__close" @click="onClose">
+                <div v-if="isClosable" class="mask__wrapper__container__close" @click="closeHandler">
                     <CloseCrossIcon />
                 </div>
             </div>
@@ -21,9 +21,22 @@ import CloseCrossIcon from '@/../static/images/common/closeCross.svg';
 
 const props = withDefaults(defineProps<{
     onClose?: () => void;
-}>(), { onClose: () => () => {} });
+    isClosable?: boolean;
+}>(), {
+    onClose: () => () => {},
+    isClosable: true,
+});
 
 const modal = ref<HTMLElement>();
+
+/**
+ * Holds on close modal logic.
+ */
+function closeHandler(): void {
+    if (props.isClosable) {
+        props.onClose();
+    }
+}
 
 onMounted((): void => {
     modal.value?.focus();
@@ -56,16 +69,35 @@ onMounted((): void => {
                 box-shadow: 0 0 32px rgb(0 0 0 / 4%);
                 margin: 0 24px;
 
-                @media screen and (max-width: 400px) {
+                @media screen and (width <= 400px) {
                     margin: 0;
                 }
 
                 &__close {
                     position: absolute;
-                    right: 24px;
-                    top: 24px;
+                    right: 3px;
+                    top: 3px;
+                    padding: 10px;
+                    border-radius: 16px;
                     cursor: pointer;
-                    opacity: 0.55;
+
+                    &:hover {
+                        background-color: var(--c-grey-2);
+                    }
+
+                    &:active {
+                        background-color: var(--c-grey-4);
+                    }
+
+                    svg {
+                        display: block;
+                        width: 12px;
+                        height: 12px;
+
+                        :deep(path) {
+                            fill: var(--c-black);
+                        }
+                    }
                 }
             }
         }

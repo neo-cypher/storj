@@ -5,6 +5,7 @@ package accounting
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"storj.io/common/memory"
@@ -86,11 +87,14 @@ type ProjectObjectsSegments struct {
 	ObjectCount  int64 `json:"objectCount"`
 }
 
-// ProjectLimits contains the storage, bandwidth and segments limits.
+// ProjectLimits contains the project limits.
 type ProjectLimits struct {
 	Usage     *int64
 	Bandwidth *int64
 	Segments  *int64
+
+	RateLimit  *int
+	BurstLimit *int
 }
 
 // ProjectDailyUsage holds project daily usage.
@@ -108,16 +112,16 @@ type ProjectUsageByDay struct {
 
 // BucketUsage consist of total bucket usage for period.
 type BucketUsage struct {
-	ProjectID  uuid.UUID
-	BucketName string
+	ProjectID  uuid.UUID `json:"projectID"`
+	BucketName string    `json:"bucketName"`
 
-	Storage      float64
-	Egress       float64
-	ObjectCount  int64
-	SegmentCount int64
+	Storage      float64 `json:"storage"`
+	Egress       float64 `json:"egress"`
+	ObjectCount  int64   `json:"objectCount"`
+	SegmentCount int64   `json:"segmentCount"`
 
-	Since  time.Time
-	Before time.Time
+	Since  time.Time `json:"since"`
+	Before time.Time `json:"before"`
 }
 
 // BucketUsageCursor holds info for bucket usage
@@ -130,15 +134,15 @@ type BucketUsageCursor struct {
 
 // BucketUsagePage represents bucket usage page result.
 type BucketUsagePage struct {
-	BucketUsages []BucketUsage
+	BucketUsages []BucketUsage `json:"bucketUsages"`
 
-	Search string
-	Limit  uint
-	Offset uint64
+	Search string `json:"search"`
+	Limit  uint   `json:"limit"`
+	Offset uint64 `json:"offset"`
 
-	PageCount   uint
-	CurrentPage uint
-	TotalCount  uint64
+	PageCount   uint   `json:"pageCount"`
+	CurrentPage uint   `json:"currentPage"`
+	TotalCount  uint64 `json:"totalCount"`
 }
 
 // BucketUsageRollup is total bucket usage info
@@ -161,6 +165,36 @@ type BucketUsageRollup struct {
 	Before time.Time `json:"before"`
 }
 
+// ProjectReportItem is total bucket usage info with project details for certain period.
+type ProjectReportItem struct {
+	ProjectID   uuid.UUID
+	ProjectName string
+
+	BucketName   string
+	Storage      float64
+	Egress       float64
+	SegmentCount float64
+	ObjectCount  float64
+
+	Since  time.Time `json:"since"`
+	Before time.Time `json:"before"`
+}
+
+// ToStringSlice converts report item values to a slice of strings.
+func (b *ProjectReportItem) ToStringSlice() []string {
+	return []string{
+		b.ProjectName,
+		b.ProjectID.String(),
+		b.BucketName,
+		fmt.Sprintf("%f", b.Storage),
+		fmt.Sprintf("%f", b.Egress),
+		fmt.Sprintf("%f", b.ObjectCount),
+		fmt.Sprintf("%f", b.SegmentCount),
+		b.Since.String(),
+		b.Before.String(),
+	}
+}
+
 // Usage contains project's usage split on segments and storage.
 type Usage struct {
 	Storage  int64
@@ -172,7 +206,7 @@ type Usage struct {
 // architecture: Database
 type StoragenodeAccounting interface {
 	// SaveTallies records tallies of data at rest
-	SaveTallies(ctx context.Context, latestTally time.Time, nodeData map[storj.NodeID]float64) error
+	SaveTallies(ctx context.Context, latestTally time.Time, nodes []storj.NodeID, tallies []float64) error
 	// GetTallies retrieves all tallies
 	GetTallies(ctx context.Context) ([]*StoragenodeStorageTally, error)
 	// GetTalliesSince retrieves all tallies since latestRollup
@@ -209,10 +243,15 @@ type ProjectAccounting interface {
 	GetTallies(ctx context.Context) ([]BucketTally, error)
 	// CreateStorageTally creates a record for BucketStorageTally in the accounting DB table
 	CreateStorageTally(ctx context.Context, tally BucketStorageTally) error
+	// GetNonEmptyTallyBucketsInRange returns a list of bucket locations within the given range
+	// whose most recent tally does not represent empty usage.
+	GetNonEmptyTallyBucketsInRange(ctx context.Context, from, to metabase.BucketLocation) ([]metabase.BucketLocation, error)
 	// GetProjectSettledBandwidthTotal returns the sum of GET bandwidth usage settled for a projectID in the past time frame.
 	GetProjectSettledBandwidthTotal(ctx context.Context, projectID uuid.UUID, from time.Time) (_ int64, err error)
 	// GetProjectBandwidth returns project allocated bandwidth for the specified year, month and day.
 	GetProjectBandwidth(ctx context.Context, projectID uuid.UUID, year int, month time.Month, day int, asOfSystemInterval time.Duration) (int64, error)
+	// GetProjectSettledBandwidth returns the used settled bandwidth for the specified year and month.
+	GetProjectSettledBandwidth(ctx context.Context, projectID uuid.UUID, year int, month time.Month, asOfSystemInterval time.Duration) (int64, error)
 	// GetProjectDailyBandwidth returns bandwidth (allocated and settled) for the specified day.
 	GetProjectDailyBandwidth(ctx context.Context, projectID uuid.UUID, year int, month time.Month, day int) (int64, int64, int64, error)
 	// DeleteProjectBandwidthBefore deletes project bandwidth rollups before the given time
@@ -239,8 +278,8 @@ type ProjectAccounting interface {
 	// GetProjectTotalByPartner retrieves project usage for a given period categorized by partner name.
 	// Unpartnered usage or usage for a partner not present in partnerNames is mapped to the empty string.
 	GetProjectTotalByPartner(ctx context.Context, projectID uuid.UUID, partnerNames []string, since, before time.Time) (usages map[string]ProjectUsage, err error)
-	// GetProjectObjectsSegments returns project objects and segments for specified period of time.
-	GetProjectObjectsSegments(ctx context.Context, projectID uuid.UUID) (*ProjectObjectsSegments, error)
+	// GetProjectObjectsSegments returns project objects and segments number.
+	GetProjectObjectsSegments(ctx context.Context, projectID uuid.UUID) (ProjectObjectsSegments, error)
 	// GetBucketUsageRollups returns usage rollup per each bucket for specified period of time.
 	GetBucketUsageRollups(ctx context.Context, projectID uuid.UUID, since, before time.Time) ([]BucketUsageRollup, error)
 	// GetSingleBucketUsageRollup returns usage rollup per single bucket for specified period of time.

@@ -14,7 +14,6 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"storj.io/common/testcontext"
-	"storj.io/common/testrand"
 	"storj.io/storj/private/testplanet"
 	"storj.io/storj/private/testredis"
 	"storj.io/storj/satellite/accounting"
@@ -27,7 +26,7 @@ import (
 	"storj.io/storj/satellite/mailservice"
 	"storj.io/storj/satellite/payments"
 	"storj.io/storj/satellite/payments/paymentsconfig"
-	"storj.io/storj/satellite/payments/stripecoinpayments"
+	"storj.io/storj/satellite/payments/stripe"
 )
 
 func TestGraphqlQuery(t *testing.T) {
@@ -64,10 +63,9 @@ func TestGraphqlQuery(t *testing.T) {
 		priceOverrides, err := pc.UsagePriceOverrides.ToModels()
 		require.NoError(t, err)
 
-		paymentsService, err := stripecoinpayments.NewService(
+		paymentsService, err := stripe.NewService(
 			log.Named("payments.stripe:service"),
-			stripecoinpayments.NewStripeMock(
-				testrand.NodeID(),
+			stripe.NewStripeMock(
 				db.StripeCoinPayments().Customers(),
 				db.Console().Users(),
 			),
@@ -81,7 +79,9 @@ func TestGraphqlQuery(t *testing.T) {
 			prices,
 			priceOverrides,
 			pc.PackagePlans.Packages,
-			pc.BonusRate)
+			pc.BonusRate,
+			nil,
+		)
 		require.NoError(t, err)
 
 		service, err := console.NewService(
@@ -101,6 +101,8 @@ func TestGraphqlQuery(t *testing.T) {
 			}, &consoleauth.Hmac{Secret: []byte("my-suppa-secret-key")}),
 			nil,
 			"",
+			"",
+			sat.Config.Metainfo.ProjectLimits.MaxBuckets,
 			console.Config{
 				PasswordCost:        console.TestPasswordCost,
 				DefaultProjectLimit: 5,
@@ -187,7 +189,7 @@ func TestGraphqlQuery(t *testing.T) {
 			return result.Data
 		}
 
-		createdProject, err := service.CreateProject(userCtx, console.ProjectInfo{
+		createdProject, err := service.CreateProject(userCtx, console.UpsertProjectInfo{
 			Name: "TestProject",
 		})
 		require.NoError(t, err)
@@ -285,7 +287,7 @@ func TestGraphqlQuery(t *testing.T) {
 
 		t.Run("Project query team members", func(t *testing.T) {
 			query := fmt.Sprintf(
-				"query {project(id: \"%s\") {members( cursor: { limit: %d, search: \"%s\", page: %d, order: %d, orderDirection: %d } ) { projectMembers{ user { id, fullName, shortName, email, createdAt }, joinedAt }, search, limit, order, offset, pageCount, currentPage, totalCount } } }",
+				"query {project(id: \"%s\") {membersAndInvitations( cursor: { limit: %d, search: \"%s\", page: %d, order: %d, orderDirection: %d } ) { projectMembers{ user { id, fullName, shortName, email, createdAt }, joinedAt }, search, limit, order, offset, pageCount, currentPage, totalCount } } }",
 				createdProject.ID.String(),
 				5,
 				"",
@@ -297,7 +299,7 @@ func TestGraphqlQuery(t *testing.T) {
 
 			data := result.(map[string]interface{})
 			project := data[consoleql.ProjectQuery].(map[string]interface{})
-			members := project[consoleql.FieldMembers].(map[string]interface{})
+			members := project[consoleql.FieldMembersAndInvitations].(map[string]interface{})
 			projectMembers := members[consoleql.FieldProjectMembers].([]interface{})
 
 			assert.Equal(t, 3, len(projectMembers))
@@ -395,7 +397,7 @@ func TestGraphqlQuery(t *testing.T) {
 			assert.True(t, foundKey2)
 		})
 
-		project2, err := service.CreateProject(userCtx, console.ProjectInfo{
+		project2, err := service.CreateProject(userCtx, console.UpsertProjectInfo{
 			Name:        "Project2",
 			Description: "Test desc",
 		})

@@ -22,6 +22,14 @@ export class Admin {
 	readonly operations = {
 		APIKeys: [
 			{
+				name: 'get',
+				desc: 'Get information on the specific API key',
+				params: [['API key', new InputText('text', true)]],
+				func: async (apiKey: string): Promise<Record<string, unknown>> => {
+					return this.fetch('GET', `apikeys/${apiKey}`);
+				}
+			},
+			{
 				name: 'delete key',
 				desc: 'Delete an API key',
 				params: [['API key', new InputText('text', true)]],
@@ -68,7 +76,8 @@ export class Admin {
 							{ text: 'European Union', value: 'EU' },
 							{ text: 'European Economic Area', value: 'EEA' },
 							{ text: 'United States', value: 'US' },
-							{ text: 'Germany', value: 'DE' }
+							{ text: 'Germany', value: 'DE' },
+							{ text: 'No Russia and/or other sanctioned country', value: 'NR' }
 						])
 					]
 				],
@@ -196,6 +205,19 @@ export class Admin {
 				}
 			},
 			{
+				name: 'update user agent',
+				desc: 'Update projects user agent',
+				params: [
+					['Project ID', new InputText('text', true)],
+					['User Agent', new InputText('text', true)]
+				],
+				func: async (projectId: string, userAgent: string): Promise<null> => {
+					return this.fetch('PATCH', `projects/${projectId}/useragent`, null, {
+						userAgent
+					}) as Promise<null>;
+				}
+			},
+			{
 				name: 'create API key',
 				desc: 'Create a new API key for a specific project',
 				params: [
@@ -216,10 +238,10 @@ export class Admin {
 					['API Key name', new InputText('text', true)]
 				],
 				func: async (projectId: string, apiKeyName: string): Promise<null> => {
-					return this.fetch(
-						'DELETE',
-						`projects/${projectId}/apikeys/${apiKeyName}`
-					) as Promise<null>;
+					const query = this.urlQueryFromObject({
+						name: apiKeyName
+					});
+					return this.fetch('DELETE', `projects/${projectId}/apikeys`, query) as Promise<null>;
 				}
 			},
 			{
@@ -227,7 +249,7 @@ export class Admin {
 				desc: 'Get the API keys of a specific project',
 				params: [['Project ID', new InputText('text', true)]],
 				func: async (projectId: string): Promise<Record<string, unknown>> => {
-					return this.fetch('GET', `projects/${projectId}/apiKeys`);
+					return this.fetch('GET', `projects/${projectId}/apikeys`);
 				}
 			},
 			{
@@ -322,6 +344,25 @@ export class Admin {
 				}
 			},
 			{
+				name: 'get users pending deletion',
+				desc: 'Get the information of a users pending deletion and have no unpaid invoices',
+				params: [
+					['Limit', new InputText('number', true)],
+					['Page', new InputText('number', true)]
+				],
+				func: async (limit: number, page: number): Promise<Record<string, unknown>> => {
+					return this.fetch('GET', `users-pending-deletion?limit=${limit}&page=${page}`);
+				}
+			},
+			{
+				name: 'get user limits',
+				desc: 'Get the current limits for a user',
+				params: [['email', new InputText('email', true)]],
+				func: async (email: string): Promise<Record<string, unknown>> => {
+					return this.fetch('GET', `users/${email}/limits`);
+				}
+			},
+			{
 				name: 'update',
 				desc: `Update the information of a user's account.
 Blank fields will not be updated.`,
@@ -330,7 +371,6 @@ Blank fields will not be updated.`,
 					['new email', new InputText('email', false)],
 					['full name', new InputText('text', false)],
 					['short name', new InputText('text', false)],
-					['partner ID', new InputText('text', false)],
 					['password hash', new InputText('text', false)],
 					['project limit (max number)', new InputText('number', false)],
 					['project storage limit (in bytes)', new InputText('number', false)],
@@ -371,6 +411,59 @@ Blank fields will not be updated.`,
 				}
 			},
 			{
+				name: "update user's project limits",
+				desc: `Update limits for all of user's existing and future projects.
+				Blank fields will not be updated.`,
+				params: [
+					["current user's email", new InputText('email', true)],
+					[
+						'project storage limit (in bytes or notations like 1GB, 2tb)',
+						new InputText('text', false)
+					],
+					[
+						'project bandwidth limit (in bytes or notations like 1GB, 2tb)',
+						new InputText('text', false)
+					],
+					['project segment limit (max number)', new InputText('number', false)]
+				],
+				func: async (
+					currentEmail: string,
+					storage?: number,
+					bandwidth?: number,
+					segment?: number
+				): Promise<null> => {
+					return this.fetch('PUT', `users/${currentEmail}/limits`, null, {
+						storage,
+						bandwidth,
+						segment
+					}) as Promise<null>;
+				}
+			},
+			{
+				name: 'update user agent',
+				desc: `Update user's user agent.`,
+				params: [
+					["current user's email", new InputText('email', true)],
+					['user agent', new InputText('text', true)]
+				],
+				func: async (currentEmail: string, userAgent: string): Promise<null> => {
+					return this.fetch('PATCH', `users/${currentEmail}/useragent`, null, {
+						userAgent
+					}) as Promise<null>;
+				}
+			},
+			{
+				name: 'activate account/disable bot restriction',
+				desc: 'disables account bot restriction by activating it. Must be used only for accounts with PendingBotVerification status.',
+				params: [['email', new InputText('email', true)]],
+				func: async (email: string): Promise<null> => {
+					return this.fetch(
+						'PATCH',
+						`users/${email}/activate-account/disable-bot-restriction`
+					) as Promise<null>;
+				}
+			},
+			{
 				name: 'disable MFA',
 				desc: "Disable user's mulifactor authentication",
 				params: [['email', new InputText('email', true)]],
@@ -379,19 +472,89 @@ Blank fields will not be updated.`,
 				}
 			},
 			{
-				name: 'freeze user',
+				name: 'billing freeze user',
 				desc: "insert user into account_freeze_events and set user's limits to zero",
 				params: [['email', new InputText('email', true)]],
 				func: async (email: string): Promise<null> => {
-					return this.fetch('PUT', `users/${email}/freeze`) as Promise<null>;
+					return this.fetch('PUT', `users/${email}/billing-freeze`) as Promise<null>;
 				}
 			},
 			{
-				name: 'unfreeze user',
+				name: 'billing unfreeze user',
 				desc: "remove user from account_freeze_events and reset user's limits to what is stored in account_freeze_events",
 				params: [['email', new InputText('email', true)]],
 				func: async (email: string): Promise<null> => {
-					return this.fetch('DELETE', `users/${email}/freeze`) as Promise<null>;
+					return this.fetch('DELETE', `users/${email}/billing-freeze`) as Promise<null>;
+				}
+			},
+			{
+				name: 'violation freeze user',
+				desc: 'freeze a user for ToS violation, set limits to zero and status to pending deletion',
+				params: [['email', new InputText('email', true)]],
+				func: async (email: string): Promise<null> => {
+					return this.fetch('PUT', `users/${email}/violation-freeze`) as Promise<null>;
+				}
+			},
+			{
+				name: 'violation unfreeze user',
+				desc: "remove a user's violation freeze, reinstating their limits and status (Active)",
+				params: [['email', new InputText('email', true)]],
+				func: async (email: string): Promise<null> => {
+					return this.fetch('DELETE', `users/${email}/violation-freeze`) as Promise<null>;
+				}
+			},
+			{
+				name: 'legal freeze user',
+				desc: 'freeze a user for legal review, set limits to zero and status to legal hold',
+				params: [['email', new InputText('email', true)]],
+				func: async (email: string): Promise<null> => {
+					return this.fetch('PUT', `users/${email}/legal-freeze`) as Promise<null>;
+				}
+			},
+			{
+				name: 'legal unfreeze user',
+				desc: "remove a user's legal freeze, reinstating their limits and status (Active)",
+				params: [['email', new InputText('email', true)]],
+				func: async (email: string): Promise<null> => {
+					return this.fetch('DELETE', `users/${email}/legal-freeze`) as Promise<null>;
+				}
+			},
+			{
+				name: 'unwarn user',
+				desc: "Remove a user's warning status",
+				params: [['email', new InputText('email', true)]],
+				func: async (email: string): Promise<null> => {
+					return this.fetch('DELETE', `users/${email}/billing-warning`) as Promise<null>;
+				}
+			},
+			{
+				name: 'set geofencing',
+				desc: 'Set account level geofence for a user',
+				params: [
+					['email', new InputText('email', true)],
+					[
+						'Region',
+						new Select(false, true, [
+							{ text: 'European Union', value: 'EU' },
+							{ text: 'European Economic Area', value: 'EEA' },
+							{ text: 'United States', value: 'US' },
+							{ text: 'Germany', value: 'DE' },
+							{ text: 'No Russia and/or other sanctioned country', value: 'NR' }
+						])
+					]
+				],
+				func: async (email: string, region: string): Promise<null> => {
+					return this.fetch('PATCH', `users/${email}/geofence`, null, {
+						region
+					}) as Promise<null>;
+				}
+			},
+			{
+				name: 'delete geofencing',
+				desc: 'Delete account level geofence for a user',
+				params: [['email', new InputText('email', true)]],
+				func: async (email: string): Promise<null> => {
+					return this.fetch('DELETE', `users/${email}/geofence`) as Promise<null>;
 				}
 			}
 		],
@@ -427,7 +590,7 @@ Blank fields will not be updated.`,
 	}
 
 	protected async fetch(
-		method: 'DELETE' | 'GET' | 'POST' | 'PUT',
+		method: 'DELETE' | 'GET' | 'POST' | 'PUT' | 'PATCH',
 		path: string,
 		query?: string,
 		data?: Record<string, unknown>

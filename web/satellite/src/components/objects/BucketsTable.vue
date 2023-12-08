@@ -3,12 +3,7 @@
 
 <template>
     <div class="buckets-table">
-        <VHeader
-            class="buckets-table__search"
-            placeholder="Buckets"
-            :search="searchBuckets"
-            style-type="access"
-        />
+        <VSearch class="buckets-table__search" :search="searchBuckets" />
         <VLoader
             v-if="isLoading || searchLoading"
             width="100px"
@@ -36,14 +31,14 @@
             :limit="bucketsPage.limit"
             :total-page-count="bucketsPage.pageCount"
             items-label="buckets"
-            :on-page-click-callback="fetchBuckets"
+            :on-page-change="fetchBuckets"
             :total-items-count="bucketsPage.totalCount"
             :selectable="false"
         >
             <template #head>
                 <th class="align-left">Name</th>
                 <th class="align-left">Storage</th>
-                <th class="align-left">Bandwidth</th>
+                <th class="align-left">Download</th>
                 <th class="align-left">Objects</th>
                 <th class="align-left">Segments</th>
                 <th class="align-left">Date Added</th>
@@ -62,26 +57,30 @@
                 />
             </template>
         </v-table>
+        <VOverallLoader v-if="overallLoading" />
     </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue';
+import { useRouter } from 'vue-router';
 
-import { BUCKET_ACTIONS } from '@/store/modules/buckets';
-import { OBJECTS_ACTIONS } from '@/store/modules/objects';
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
 import { BucketPage } from '@/types/buckets';
-import { RouteConfig } from '@/router';
-import { AnalyticsHttpApi } from '@/api/analytics';
-import { useNotify, useRouter, useStore } from '@/utils/hooks';
+import { RouteConfig } from '@/types/router';
+import { useNotify } from '@/utils/hooks';
 import { AnalyticsErrorEventSource, AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
+import { MODALS } from '@/utils/constants/appStatePopUps';
+import { EdgeCredentials } from '@/types/accessGrants';
+import { useAppStore } from '@/store/modules/appStore';
+import { useBucketsStore } from '@/store/modules/bucketsStore';
+import { useProjectsStore } from '@/store/modules/projectsStore';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 import VTable from '@/components/common/VTable.vue';
 import BucketItem from '@/components/objects/BucketItem.vue';
 import VLoader from '@/components/common/VLoader.vue';
-import VButton from '@/components/common/VButton.vue';
-import VHeader from '@/components/common/VHeader.vue';
+import VOverallLoader from '@/components/common/VOverallLoader.vue';
+import VSearch from '@/components/common/VSearch.vue';
 
 import WhitePlusIcon from '@/../static/images/common/plusWhite.svg';
 import EmptyBucketIcon from '@/../static/images/objects/emptyBucket.svg';
@@ -94,10 +93,13 @@ const props = withDefaults(defineProps<{
 });
 
 const activeDropdown = ref<number>(-1);
+const overallLoading = ref<boolean>(false);
 const searchLoading = ref<boolean>(false);
-const analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
 
-const store = useStore();
+const analyticsStore = useAnalyticsStore();
+const bucketsStore = useBucketsStore();
+const appStore = useAppStore();
+const projectsStore = useProjectsStore();
 const notify = useNotify();
 const router = useRouter();
 
@@ -105,14 +107,14 @@ const router = useRouter();
  * Returns fetched buckets page from store.
  */
 const bucketsPage = computed((): BucketPage => {
-    return store.state.bucketUsageModule.page;
+    return bucketsStore.state.page;
 });
 
 /**
  * Returns buckets search query.
  */
 const searchQuery = computed((): string => {
-    return store.getters.cursor.search;
+    return bucketsStore.state.cursor.search;
 });
 
 /**
@@ -140,31 +142,31 @@ const isTableShown = computed((): boolean => {
  * Returns condition if user has to be prompt for passphrase from store.
  */
 const promptForPassphrase = computed((): boolean => {
-    return store.state.objectsModule.promptForPassphrase;
+    return bucketsStore.state.promptForPassphrase;
 });
 
 /**
- * Toggles set passphrase modal visibility.
+ * Returns edge credentials from store.
  */
-function onSetClick() {
-    store.commit(APP_STATE_MUTATIONS.TOGGLE_CREATE_PROJECT_PASSPHRASE_MODAL_SHOWN);
-}
+const edgeCredentials = computed((): EdgeCredentials => {
+    return bucketsStore.state.edgeCredentials;
+});
 
 /**
  * Toggles create bucket modal visibility.
  */
 function onCreateBucketClick(): void {
-    store.commit(APP_STATE_MUTATIONS.TOGGLE_CREATE_BUCKET_MODAL_SHOWN);
+    appStore.updateActiveModal(MODALS.createBucket);
 }
 
 /**
  * Fetches bucket using api.
  */
-async function fetchBuckets(page = 1): Promise<void> {
+async function fetchBuckets(page = 1, limit: number): Promise<void> {
     try {
-        await store.dispatch(BUCKET_ACTIONS.FETCH, page);
+        await bucketsStore.getBuckets(page, projectsStore.state.selectedProject.id, limit);
     } catch (error) {
-        await notify.error(`Unable to fetch buckets. ${error.message}`, AnalyticsErrorEventSource.BUCKET_TABLE);
+        notify.error(`Unable to fetch buckets. ${error.message}`, AnalyticsErrorEventSource.BUCKET_TABLE);
     }
 }
 
@@ -172,15 +174,15 @@ async function fetchBuckets(page = 1): Promise<void> {
  * Handles bucket search functionality.
  */
 async function searchBuckets(searchQuery: string): Promise<void> {
-    await store.dispatch(BUCKET_ACTIONS.SET_SEARCH, searchQuery);
-    await analytics.eventTriggered(AnalyticsEvent.SEARCH_BUCKETS);
+    bucketsStore.setBucketsSearch(searchQuery);
+    analyticsStore.eventTriggered(AnalyticsEvent.SEARCH_BUCKETS);
 
     searchLoading.value = true;
 
     try {
-        await store.dispatch(BUCKET_ACTIONS.FETCH, 1);
+        await bucketsStore.getBuckets(1, projectsStore.state.selectedProject.id);
     } catch (error) {
-        await notify.error(`Unable to fetch buckets: ${error.message}`, AnalyticsErrorEventSource.BUCKET_TABLE);
+        notify.error(`Unable to fetch buckets: ${error.message}`, AnalyticsErrorEventSource.BUCKET_TABLE);
     }
 
     searchLoading.value = false;
@@ -202,20 +204,33 @@ function openDropdown(key: number): void {
 /**
  * Holds on bucket click. Proceeds to file browser.
  */
-function openBucket(bucketName: string): void {
-    store.dispatch(OBJECTS_ACTIONS.SET_FILE_COMPONENT_BUCKET_NAME, bucketName);
+async function openBucket(bucketName: string): Promise<void> {
+    bucketsStore.setFileComponentBucketName(bucketName);
     if (!promptForPassphrase.value) {
-        analytics.pageVisit(RouteConfig.Buckets.with(RouteConfig.UploadFile).path);
+        if (!edgeCredentials.value.accessKeyId) {
+            overallLoading.value = true;
+
+            try {
+                await bucketsStore.setS3Client(projectsStore.state.selectedProject.id);
+                overallLoading.value = false;
+            } catch (error) {
+                notify.notifyError(error, AnalyticsErrorEventSource.BUCKET_TABLE);
+                overallLoading.value = false;
+                return;
+            }
+        }
+
+        analyticsStore.pageVisit(RouteConfig.Buckets.with(RouteConfig.UploadFile).path);
         router.push(RouteConfig.Buckets.with(RouteConfig.UploadFile).path);
 
         return;
     }
 
-    store.commit(APP_STATE_MUTATIONS.TOGGLE_OPEN_BUCKET_MODAL_SHOWN);
+    appStore.updateActiveModal(MODALS.enterBucketPassphrase);
 }
 
 onBeforeUnmount(() => {
-    store.dispatch(BUCKET_ACTIONS.SET_SEARCH, '');
+    bucketsStore.setBucketsSearch('');
 });
 </script>
 
@@ -225,7 +240,6 @@ onBeforeUnmount(() => {
 
         &__search {
             margin-bottom: 20px;
-            height: 56px;
         }
 
         &__loader {
@@ -246,7 +260,7 @@ onBeforeUnmount(() => {
             &__image {
                 margin-bottom: 60px;
 
-                @media screen and (max-width: 600px) {
+                @media screen and (width <= 600px) {
                     display: none;
                 }
             }
@@ -255,7 +269,7 @@ onBeforeUnmount(() => {
                 display: none;
                 margin-bottom: 60px;
 
-                @media screen and (max-width: 600px) {
+                @media screen and (width <= 600px) {
                     display: block;
                 }
             }
@@ -327,7 +341,7 @@ onBeforeUnmount(() => {
         }
     }
 
-    @media screen and (max-width: 875px) {
+    @media screen and (width <= 875px) {
 
         :deep(thead) {
             display: none;

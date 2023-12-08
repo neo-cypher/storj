@@ -23,7 +23,6 @@ import (
 
 	"storj.io/common/memory"
 	"storj.io/common/pb"
-	"storj.io/common/storj"
 	"storj.io/common/sync2"
 	"storj.io/common/testcontext"
 	"storj.io/common/testrand"
@@ -36,7 +35,6 @@ import (
 	"storj.io/storj/satellite/satellitedb/satellitedbtest"
 	snorders "storj.io/storj/storagenode/orders"
 	"storj.io/uplink"
-	"storj.io/uplink/private/eestream"
 )
 
 func TestProjectUsageStorage(t *testing.T) {
@@ -184,7 +182,8 @@ func TestProjectSegmentLimit(t *testing.T) {
 			},
 		},
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
-		data := testrand.Bytes(160 * memory.KiB)
+		// tally self-corrects live accounting, however, it may cause things to be temporarily off by a few segments.
+		planet.Satellites[0].Accounting.Tally.Loop.Pause()
 
 		// set limit manually to 10 segments
 		accountingDB := planet.Satellites[0].DB.ProjectAccounting()
@@ -192,6 +191,7 @@ func TestProjectSegmentLimit(t *testing.T) {
 		require.NoError(t, err)
 
 		// successful upload
+		data := testrand.Bytes(160 * memory.KiB)
 		err = planet.Uplinks[0].Upload(ctx, planet.Satellites[0], "testbucket", "test/path/0", data)
 		require.NoError(t, err)
 
@@ -205,14 +205,17 @@ func TestProjectSegmentLimit(t *testing.T) {
 
 func TestProjectSegmentLimitInline(t *testing.T) {
 	testplanet.Run(t, testplanet.Config{
-		SatelliteCount: 1, UplinkCount: 1}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
-		data := testrand.Bytes(1 * memory.KiB)
+		SatelliteCount: 1, UplinkCount: 1,
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		// tally self-corrects live accounting, however, it may cause things to be temporarily off by a few segments.
+		planet.Satellites[0].Accounting.Tally.Loop.Pause()
 
 		// set limit manually to 10 segments
 		accountingDB := planet.Satellites[0].DB.ProjectAccounting()
 		err := accountingDB.UpdateProjectSegmentLimit(ctx, planet.Uplinks[0].Projects[0].ID, 10)
 		require.NoError(t, err)
 
+		data := testrand.Bytes(1 * memory.KiB)
 		for i := 0; i < 10; i++ {
 			// successful upload
 			err = planet.Uplinks[0].Upload(ctx, planet.Satellites[0], "testbucket", "test/path/"+strconv.Itoa(i), data)
@@ -262,14 +265,17 @@ func TestProjectBandwidthLimitWithoutCache(t *testing.T) {
 
 func TestProjectSegmentLimitMultipartUpload(t *testing.T) {
 	testplanet.Run(t, testplanet.Config{
-		SatelliteCount: 1, UplinkCount: 1}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
-		data := testrand.Bytes(1 * memory.KiB)
+		SatelliteCount: 1, UplinkCount: 1,
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		// tally self-corrects live accounting, however, it may cause things to be temporarily off by a few segments.
+		planet.Satellites[0].Accounting.Tally.Loop.Pause()
 
 		// set limit manually to 10 segments
 		accountingDB := planet.Satellites[0].DB.ProjectAccounting()
 		err := accountingDB.UpdateProjectSegmentLimit(ctx, planet.Uplinks[0].Projects[0].ID, 4)
 		require.NoError(t, err)
 
+		data := testrand.Bytes(1 * memory.KiB)
 		for i := 0; i < 4; i++ {
 			// successful upload
 			err = planet.Uplinks[0].Upload(ctx, planet.Satellites[0], "testbucket", "test/path/"+strconv.Itoa(i), data)
@@ -1080,27 +1086,17 @@ func TestProjectUsage_BandwidthDeadAllocation(t *testing.T) {
 		now := time.Now()
 		project := planet.Uplinks[0].Projects[0]
 
-		sat := planet.Satellites[0]
-		rs, err := eestream.NewRedundancyStrategyFromStorj(storj.RedundancyScheme{
-			RequiredShares: int16(sat.Config.Metainfo.RS.Min),
-			RepairShares:   int16(sat.Config.Metainfo.RS.Repair),
-			OptimalShares:  int16(sat.Config.Metainfo.RS.Success),
-			TotalShares:    int16(sat.Config.Metainfo.RS.Total),
-			ShareSize:      sat.Config.Metainfo.RS.ErasureShareSize.Int32(),
-		})
-		require.NoError(t, err)
-
 		dataSize := 4 * memory.MiB
 		data := testrand.Bytes(dataSize)
 
-		err = planet.Uplinks[0].Upload(ctx, planet.Satellites[0], "testbucket", "test/path1", data)
+		err := planet.Uplinks[0].Upload(ctx, planet.Satellites[0], "testbucket", "test/path1", data)
 		require.NoError(t, err)
 
 		segments, err := planet.Satellites[0].Metabase.DB.TestingAllSegments(ctx)
 		require.NoError(t, err)
 		require.Len(t, segments, 1)
 
-		pieceSize := eestream.CalcPieceSize(int64(segments[0].EncryptedSize), rs)
+		pieceSize := segments[0].PieceSize()
 
 		reader, cleanFn, err := planet.Uplinks[0].DownloadStream(ctx, planet.Satellites[0], "testbucket", "test/path1")
 		require.NoError(t, err)
@@ -1110,8 +1106,8 @@ func TestProjectUsage_BandwidthDeadAllocation(t *testing.T) {
 		total, err := io.ReadFull(reader, p)
 		require.NoError(t, err)
 		require.Equal(t, total, len(p))
-		require.NoError(t, cleanFn())
 		require.NoError(t, reader.Close())
+		require.NoError(t, cleanFn())
 
 		planet.Satellites[0].Orders.Chore.Loop.TriggerWait()
 

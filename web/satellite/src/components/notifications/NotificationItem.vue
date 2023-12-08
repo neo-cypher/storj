@@ -2,20 +2,36 @@
 // See LICENSE for copying information.
 
 <template>
-    <div :style="notification.style" class="notification-wrap" :class="{ active: isClassActive }" @mouseover="onMouseOver" @mouseleave="onMouseLeave">
+    <div
+        :style="{ backgroundColor: notification.backgroundColor }"
+        class="notification-wrap"
+        :class="{ active: isClassActive }"
+        @mouseover="onMouseOver"
+        @mouseleave="onMouseLeave"
+    >
         <div class="notification-wrap__content-area">
             <div class="notification-wrap__content-area__image">
                 <component :is="notification.icon" />
             </div>
             <div class="notification-wrap__content-area__message-area">
-                <p class="notification-wrap__content-area__message">{{ notification.message }}</p>
+                <p ref="messageArea" class="notification-wrap__content-area__message">
+                    <component :is="notification.messageNode" />
+                </p>
+
+                <p v-if="isTimeoutMentioned && notOnSettingsPage" class="notification-wrap__content-area__account-msg">
+                    To change this go to your
+                    <router-link :to="settingsRoute" class="notification-wrap__content-area__account-msg__link">
+                        account settings
+                    </router-link>
+                </p>
+
                 <a
                     v-if="isSupportLinkMentioned"
-                    :href="requestUrl"
+                    :href="requestURL"
                     class="notification-wrap__content-area__link"
                     target="_blank"
                 >
-                    {{ requestUrl }}
+                    {{ requestURL }}
                 </a>
             </div>
         </div>
@@ -27,66 +43,94 @@
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Prop, Vue } from 'vue-property-decorator';
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue';
+import { useRoute } from 'vue-router';
 
-import { DelayedNotification } from '@/types/DelayedNotification';
-import { NOTIFICATION_ACTIONS } from '@/utils/constants/actionNames';
-import { MetaUtils } from '@/utils/meta';
+import { DelayedNotification, NotificationType } from '@/types/DelayedNotification';
+import { useNotificationsStore } from '@/store/modules/notificationsStore';
+import { useConfigStore } from '@/store/modules/configStore';
+import { RouteConfig } from '@/types/router';
 
 import CloseIcon from '@/../static/images/notifications/close.svg';
 
-// @vue/component
-@Component({
-    components: {
-        CloseIcon,
-    },
-})
-export default class NotificationItem extends Vue {
-    @Prop({ default: () => new DelayedNotification(() => { return; }, '', '') })
-    private notification: DelayedNotification;
+const configStore = useConfigStore();
+const notificationsStore = useNotificationsStore();
+const route = useRoute();
 
-    public readonly requestUrl = MetaUtils.getMetaContent('general-request-url');
-    public isClassActive = false;
+const props = withDefaults(defineProps<{
+    notification: DelayedNotification;
+}>(), {
+    notification: () => new DelayedNotification(() => {}, NotificationType.Info, ''),
+});
 
-    /**
-     * Indicates if support word is mentioned in message.
-     * Temporal solution, can be changed later.
-     */
-    public get isSupportLinkMentioned(): boolean {
-        return this.notification.message.toLowerCase().includes('support');
+const isClassActive = ref<boolean>(false);
+const isTimeoutMentioned = ref<boolean>(false);
+const isSupportLinkMentioned = ref<boolean>(false);
+const messageArea = ref<HTMLParagraphElement | null>(null);
+
+/**
+ * Returns the correct settings route based on if we're on all projects dashboard.
+ */
+const settingsRoute = computed((): string => {
+    if (
+        route.path.includes(RouteConfig.AllProjectsDashboard.path)
+        || route.path.includes(RouteConfig.AccountSettings.path)
+    ) {
+        return RouteConfig.AccountSettings.with(RouteConfig.Settings2).path;
     }
 
-    /**
-     * Forces notification deletion.
-     */
-    public onCloseClick(): void {
-        this.$store.dispatch(NOTIFICATION_ACTIONS.DELETE, this.notification.id);
-    }
+    return RouteConfig.Account.with(RouteConfig.Settings).path;
+});
 
-    /**
-     * Forces notification to stay on page on mouse over it.
-     */
-    public onMouseOver(): void {
-        this.$store.dispatch(NOTIFICATION_ACTIONS.PAUSE, this.notification.id);
-    }
+/**
+ * Returns the URL for the general request page from the store.
+ */
+const requestURL = computed((): string => {
+    return configStore.state.config.generalRequestURL;
+});
 
-    /**
-     * Resume notification flow when mouse leaves notification.
-     */
-    public onMouseLeave(): void {
-        this.$store.dispatch(NOTIFICATION_ACTIONS.RESUME, this.notification.id);
-    }
+/**
+ * Returns whether we are not on a settings page.
+ */
+const notOnSettingsPage = computed((): boolean => {
+    return route.name !== RouteConfig.Settings.name
+        && route.name !== RouteConfig.Settings2.name;
+});
 
-    /**
-     * Uses for class change for animation.
-     */
-    public mounted(): void {
-        setTimeout(() => {
-            this.isClassActive = true;
-        }, 100);
-    }
+/**
+ * Forces notification deletion.
+ */
+function onCloseClick(): void {
+    notificationsStore.deleteNotification(props.notification.id);
 }
+
+/**
+ * Forces notification to stay on page on mouse over it.
+ */
+function onMouseOver(): void {
+    notificationsStore.pauseNotification(props.notification.id);
+}
+
+/**
+ * Resume notification flow when mouse leaves notification.
+ */
+function onMouseLeave(): void {
+    notificationsStore.resumeNotification(props.notification.id);
+}
+
+/**
+ * Uses for class change for animation.
+ */
+onMounted((): void => {
+    const msg = messageArea.value?.innerText.toLowerCase() || '';
+    isSupportLinkMentioned.value = msg.includes('support');
+    isTimeoutMentioned.value = msg.includes('session timeout');
+
+    setTimeout(() => {
+        isClassActive.value = true;
+    }, 100);
+});
 </script>
 
 <style scoped lang="scss">
@@ -126,6 +170,10 @@ export default class NotificationItem extends Vue {
                 height: auto;
                 width: 270px;
                 word-break: break-word;
+
+                @media screen and (width <= 450px) {
+                    width: unset;
+                }
             }
 
             &__link {
@@ -134,6 +182,17 @@ export default class NotificationItem extends Vue {
                 text-decoration: underline;
                 cursor: pointer;
                 word-break: normal;
+            }
+
+            &__account-msg {
+                margin-top: 20px;
+
+                &__link {
+                    display: block;
+                    color: var(--c-black);
+                    text-decoration: underline;
+                    cursor: pointer;
+                }
             }
         }
 
@@ -151,4 +210,23 @@ export default class NotificationItem extends Vue {
     .active {
         right: 0;
     }
+</style>
+
+<style lang="scss">
+.message-title,
+.message-info {
+    font-family: 'font_medium', sans-serif;
+    font-size: 14px;
+    line-height: 20px;
+}
+
+.message-info {
+    font-family: 'font_regular', sans-serif;
+}
+
+.message-footer {
+    font-family: 'font_regular', sans-serif;
+    font-size: 12px;
+    line-height: 20px;
+}
 </style>

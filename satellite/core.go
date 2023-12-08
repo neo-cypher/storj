@@ -18,38 +18,37 @@ import (
 	"storj.io/common/peertls/extensions"
 	"storj.io/common/peertls/tlsopts"
 	"storj.io/common/rpc"
-	"storj.io/common/signing"
 	"storj.io/common/storj"
 	"storj.io/private/debug"
 	"storj.io/private/version"
 	"storj.io/storj/private/lifecycle"
 	version_checker "storj.io/storj/private/version/checker"
 	"storj.io/storj/satellite/accounting"
-	"storj.io/storj/satellite/accounting/nodetally"
 	"storj.io/storj/satellite/accounting/projectbwcleanup"
 	"storj.io/storj/satellite/accounting/rollup"
 	"storj.io/storj/satellite/accounting/rolluparchive"
 	"storj.io/storj/satellite/accounting/tally"
+	"storj.io/storj/satellite/analytics"
 	"storj.io/storj/satellite/audit"
+	"storj.io/storj/satellite/console"
 	"storj.io/storj/satellite/console/consoleauth"
+	"storj.io/storj/satellite/console/dbcleanup"
 	"storj.io/storj/satellite/console/emailreminders"
-	"storj.io/storj/satellite/gracefulexit"
+	"storj.io/storj/satellite/gc/sender"
 	"storj.io/storj/satellite/mailservice"
 	"storj.io/storj/satellite/metabase"
-	"storj.io/storj/satellite/metabase/segmentloop"
 	"storj.io/storj/satellite/metabase/zombiedeletion"
 	"storj.io/storj/satellite/metainfo/expireddeletion"
-	"storj.io/storj/satellite/metrics"
 	"storj.io/storj/satellite/nodeevents"
-	"storj.io/storj/satellite/orders"
 	"storj.io/storj/satellite/overlay"
 	"storj.io/storj/satellite/overlay/offlinenodes"
 	"storj.io/storj/satellite/overlay/straynodes"
 	"storj.io/storj/satellite/payments"
+	"storj.io/storj/satellite/payments/accountfreeze"
 	"storj.io/storj/satellite/payments/billing"
 	"storj.io/storj/satellite/payments/storjscan"
-	"storj.io/storj/satellite/payments/stripecoinpayments"
-	"storj.io/storj/satellite/repair/checker"
+	"storj.io/storj/satellite/payments/stripe"
+	"storj.io/storj/satellite/repair/repairer"
 	"storj.io/storj/satellite/reputation"
 )
 
@@ -70,6 +69,10 @@ type Core struct {
 	Version struct {
 		Chore   *version_checker.Chore
 		Service *version_checker.Service
+	}
+
+	Analytics struct {
+		Service *analytics.Service
 	}
 
 	Mail struct {
@@ -97,27 +100,17 @@ type Core struct {
 	}
 
 	Metainfo struct {
-		Metabase    *metabase.DB
-		SegmentLoop *segmentloop.Service
-	}
-
-	Orders struct {
-		DB      orders.DB
-		Service *orders.Service
-		Chore   *orders.Chore
+		Metabase *metabase.DB
 	}
 
 	Reputation struct {
 		Service *reputation.Service
 	}
 
-	Repair struct {
-		Checker *checker.Checker
-	}
-
 	Audit struct {
-		VerifyQueue audit.VerifyQueue
-		Chore       *audit.Chore
+		VerifyQueue          audit.VerifyQueue
+		ReverifyQueue        audit.ReverifyQueue
+		ContainmentSyncChore *audit.ContainmentSyncChore
 	}
 
 	ExpiredDeletion struct {
@@ -130,7 +123,6 @@ type Core struct {
 
 	Accounting struct {
 		Tally                 *tally.Service
-		NodeTally             *nodetally.Service
 		Rollup                *rollup.Service
 		RollupArchiveChore    *rolluparchive.Chore
 		ProjectBWCleanupChore *projectbwcleanup.Chore
@@ -141,6 +133,7 @@ type Core struct {
 	}
 
 	Payments struct {
+		AccountFreeze    *accountfreeze.Chore
 		Accounts         payments.Accounts
 		BillingChore     *billing.Chore
 		StorjscanClient  *storjscan.Client
@@ -148,20 +141,24 @@ type Core struct {
 		StorjscanChore   *storjscan.Chore
 	}
 
-	GracefulExit struct {
-		Chore *gracefulexit.Chore
+	ConsoleDBCleanup struct {
+		Chore *dbcleanup.Chore
 	}
 
-	Metrics struct {
-		Chore *metrics.Chore
+	GarbageCollection struct {
+		Sender *sender.Service
+	}
+
+	RepairQueueStat struct {
+		Chore *repairer.QueueStat
 	}
 }
 
 // New creates a new satellite.
 func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 	metabaseDB *metabase.DB, revocationDB extensions.RevocationDB,
-	liveAccounting accounting.Cache, rollupsWriteCache *orders.RollupsWriteCache,
-	versionInfo version.Info, config *Config, atomicLogLevel *zap.AtomicLevel) (*Core, error) {
+	liveAccounting accounting.Cache, versionInfo version.Info, config *Config,
+	atomicLogLevel *zap.AtomicLevel) (*Core, error) {
 	peer := &Core{
 		Log:      log,
 		Identity: full,
@@ -173,8 +170,8 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 
 	{ // setup debug
 		var err error
-		if config.Debug.Address != "" {
-			peer.Debug.Listener, err = net.Listen("tcp", config.Debug.Address)
+		if config.Debug.Addr != "" {
+			peer.Debug.Listener, err = net.Listen("tcp", config.Debug.Addr)
 			if err != nil {
 				withoutStack := errors.New(err.Error())
 				peer.Log.Debug("failed to start debug endpoints", zap.Error(withoutStack))
@@ -255,9 +252,15 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 		}
 	}
 
+	placement, err := config.Placement.Parse()
+	if err != nil {
+		return nil, err
+	}
+
 	{ // setup overlay
+
 		peer.Overlay.DB = peer.DB.OverlayCache()
-		peer.Overlay.Service, err = overlay.NewService(peer.Log.Named("overlay"), peer.Overlay.DB, peer.DB.NodeEvents(), peer.Mail.Service, config.Console.ExternalAddress, config.Console.SatelliteName, config.Overlay)
+		peer.Overlay.Service, err = overlay.NewService(peer.Log.Named("overlay"), peer.Overlay.DB, peer.DB.NodeEvents(), placement.CreateFilters, config.Console.ExternalAddress, config.Console.SatelliteName, config.Overlay)
 		if err != nil {
 			return nil, errs.Combine(err, peer.Close())
 		}
@@ -317,63 +320,8 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 		peer.LiveAccounting.Cache = liveAccounting
 	}
 
-	{ // setup orders
-		peer.Orders.DB = rollupsWriteCache
-		peer.Orders.Chore = orders.NewChore(log.Named("orders:chore"), rollupsWriteCache, config.Orders)
-		peer.Services.Add(lifecycle.Item{
-			Name:  "orders:chore",
-			Run:   peer.Orders.Chore.Run,
-			Close: peer.Orders.Chore.Close,
-		})
-		var err error
-		peer.Orders.Service, err = orders.NewService(
-			peer.Log.Named("orders:service"),
-			signing.SignerFromFullIdentity(peer.Identity),
-			peer.Overlay.Service,
-			peer.Orders.DB,
-			config.Orders,
-		)
-		if err != nil {
-			return nil, errs.Combine(err, peer.Close())
-		}
-	}
-
 	{ // setup metainfo
 		peer.Metainfo.Metabase = metabaseDB
-
-		peer.Metainfo.SegmentLoop = segmentloop.New(
-			peer.Log.Named("metainfo:segmentloop"),
-			config.Metainfo.SegmentLoop,
-			peer.Metainfo.Metabase,
-		)
-		peer.Services.Add(lifecycle.Item{
-			Name:  "metainfo:segmentloop",
-			Run:   peer.Metainfo.SegmentLoop.Run,
-			Close: peer.Metainfo.SegmentLoop.Close,
-		})
-	}
-
-	{ // setup data repair
-		log := peer.Log.Named("repair:checker")
-		if config.Repairer.UseRangedLoop {
-			log.Info("using ranged loop")
-		} else {
-			peer.Repair.Checker = checker.NewChecker(
-				log,
-				peer.DB.RepairQueue(),
-				peer.Metainfo.Metabase,
-				peer.Metainfo.SegmentLoop,
-				peer.Overlay.Service,
-				config.Checker)
-			peer.Services.Add(lifecycle.Item{
-				Name:  "repair:checker",
-				Run:   peer.Repair.Checker.Run,
-				Close: peer.Repair.Checker.Close,
-			})
-
-			peer.Debug.Server.Panel.Add(
-				debug.Cycle("Repair Checker", peer.Repair.Checker.Loop))
-		}
 	}
 
 	{ // setup reputation
@@ -401,23 +349,19 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 		config := config.Audit
 
 		peer.Audit.VerifyQueue = db.VerifyQueue()
+		peer.Audit.ReverifyQueue = db.ReverifyQueue()
 
-		if config.UseRangedLoop {
-			peer.Log.Named("audit:chore").Info("using ranged loop")
-		} else {
-			peer.Audit.Chore = audit.NewChore(peer.Log.Named("audit:chore"),
-				peer.Audit.VerifyQueue,
-				peer.Metainfo.SegmentLoop,
-				config,
-			)
-			peer.Services.Add(lifecycle.Item{
-				Name:  "audit:chore",
-				Run:   peer.Audit.Chore.Run,
-				Close: peer.Audit.Chore.Close,
-			})
-			peer.Debug.Server.Panel.Add(
-				debug.Cycle("Audit Chore", peer.Audit.Chore.Loop))
-		}
+		peer.Audit.ContainmentSyncChore = audit.NewContainmentSyncChore(peer.Log.Named("audit:containment-sync-chore"),
+			peer.Audit.ReverifyQueue,
+			peer.Overlay.DB,
+			config.ContainmentSyncChoreInterval,
+		)
+		peer.Services.Add(lifecycle.Item{
+			Name: "audit:containment-sync-chore",
+			Run:  peer.Audit.ContainmentSyncChore.Run,
+		})
+		peer.Debug.Server.Panel.Add(
+			debug.Cycle("Audit Containment Sync Chore", peer.Audit.ContainmentSyncChore.Loop))
 	}
 
 	{ // setup expired segment cleanup
@@ -460,20 +404,6 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 		peer.Debug.Server.Panel.Add(
 			debug.Cycle("Accounting Tally", peer.Accounting.Tally.Loop))
 
-		// storage nodes tally
-		nodeTallyLog := peer.Log.Named("accounting:nodetally")
-
-		if config.Tally.UseRangedLoop {
-			nodeTallyLog.Info("using ranged loop")
-		} else {
-			peer.Accounting.NodeTally = nodetally.New(nodeTallyLog, peer.DB.StoragenodeAccounting(), peer.Metainfo.SegmentLoop, config.Tally.Interval)
-			peer.Services.Add(lifecycle.Item{
-				Name:  "accounting:nodetally",
-				Run:   peer.Accounting.NodeTally.Run,
-				Close: peer.Accounting.NodeTally.Close,
-			})
-		}
-
 		// Lets add 1 more day so we catch any off by one errors when deleting tallies
 		orderExpirationPlusDay := config.Orders.Expiration + config.Rollup.Interval
 		peer.Accounting.Rollup = rollup.New(peer.Log.Named("accounting:rollup"), peer.DB.StoragenodeAccounting(), config.Rollup, orderExpirationPlusDay)
@@ -508,20 +438,33 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 		}
 	}
 
+	{ // setup analytics service
+		peer.Analytics.Service = analytics.NewService(peer.Log.Named("analytics:service"), config.Analytics, config.Console.SatelliteName)
+
+		peer.Services.Add(lifecycle.Item{
+			Name:  "analytics:service",
+			Run:   peer.Analytics.Service.Run,
+			Close: peer.Analytics.Service.Close,
+		})
+	}
+
 	// TODO: remove in future, should be in API
 	{ // setup payments
 		pc := config.Payments
 
-		var stripeClient stripecoinpayments.StripeClient
+		var stripeClient stripe.Client
 		switch pc.Provider {
-		default:
-			stripeClient = stripecoinpayments.NewStripeMock(
-				peer.ID(),
+		case "": // just new mock, only used in testing binaries
+			stripeClient = stripe.NewStripeMock(
 				peer.DB.StripeCoinPayments().Customers(),
 				peer.DB.Console().Users(),
 			)
+		case "mock":
+			stripeClient = pc.MockProvider
 		case "stripecoinpayments":
-			stripeClient = stripecoinpayments.NewStripeClient(log, pc.StripeCoinPayments)
+			stripeClient = stripe.NewStripeClient(log, pc.StripeCoinPayments)
+		default:
+			return nil, errs.New("invalid stripe coin payments provider %q", pc.Provider)
 		}
 
 		prices, err := pc.UsagePrice.ToModel()
@@ -534,7 +477,7 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 			return nil, errs.Combine(err, peer.Close())
 		}
 
-		service, err := stripecoinpayments.NewService(
+		service, err := stripe.NewService(
 			peer.Log.Named("payments.stripe:service"),
 			stripeClient,
 			pc.StripeCoinPayments,
@@ -547,7 +490,9 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 			prices,
 			priceOverrides,
 			pc.PackagePlans.Packages,
-			pc.BonusRate)
+			pc.BonusRate,
+			peer.Analytics.Service,
+		)
 		if err != nil {
 			return nil, errs.Combine(err, peer.Close())
 		}
@@ -562,7 +507,9 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 		peer.Payments.StorjscanService = storjscan.NewService(log.Named("storjscan-service"),
 			peer.DB.Wallets(),
 			peer.DB.StorjscanPayments(),
-			peer.Payments.StorjscanClient)
+			peer.Payments.StorjscanClient,
+			pc.Storjscan.Confirmations,
+			pc.BonusRate)
 		if err != nil {
 			return nil, errs.Combine(err, peer.Close())
 		}
@@ -583,12 +530,23 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 			debug.Cycle("Payments Storjscan", peer.Payments.StorjscanChore.TransactionCycle),
 		)
 
+		freezeService := console.NewAccountFreezeService(peer.DB.Console(), peer.Analytics.Service, config.Console.AccountFreeze)
+		choreObservers := billing.ChoreObservers{
+			UpgradeUser: console.NewUpgradeUserObserver(peer.DB.Console(), peer.DB.Billing(), config.Console.UsageLimits, config.Console.UserBalanceForUpgrade, freezeService),
+			PayInvoices: console.NewInvoiceTokenPaymentObserver(
+				peer.DB.Console(), peer.Payments.Accounts.Invoices(),
+				freezeService,
+			),
+		}
+
 		peer.Payments.BillingChore = billing.NewChore(
 			peer.Log.Named("payments.billing:chore"),
 			[]billing.PaymentType{peer.Payments.StorjscanService},
 			peer.DB.Billing(),
 			config.Payments.BillingConfig.Interval,
 			config.Payments.BillingConfig.DisableLoop,
+			config.Payments.BonusRate,
+			choreObservers,
 		)
 		peer.Services.Add(lifecycle.Item{
 			Name:  "billing:chore",
@@ -597,43 +555,68 @@ func New(log *zap.Logger, full *identity.FullIdentity, db DB,
 		})
 	}
 
-	{ // setup graceful exit
-		log := peer.Log.Named("gracefulexit")
-		switch {
-		case !config.GracefulExit.Enabled:
-			log.Info("disabled")
-		case config.GracefulExit.UseRangedLoop:
-			log.Info("using ranged loop")
-		default:
-			peer.GracefulExit.Chore = gracefulexit.NewChore(log, peer.DB.GracefulExit(), peer.Overlay.DB, peer.Metainfo.SegmentLoop, config.GracefulExit)
+	{ // setup account freeze
+		if config.AccountFreeze.Enabled {
+			peer.Payments.AccountFreeze = accountfreeze.NewChore(
+				peer.Log.Named("payments.accountfreeze:chore"),
+				peer.DB.StripeCoinPayments(),
+				peer.Payments.Accounts,
+				peer.DB.Console().Users(),
+				peer.DB.Wallets(),
+				peer.DB.StorjscanPayments(),
+				console.NewAccountFreezeService(db.Console(), peer.Analytics.Service, config.Console.AccountFreeze),
+				peer.Analytics.Service,
+				config.AccountFreeze,
+			)
+
 			peer.Services.Add(lifecycle.Item{
-				Name:  "gracefulexit",
-				Run:   peer.GracefulExit.Chore.Run,
-				Close: peer.GracefulExit.Chore.Close,
+				Name:  "accountfreeze:chore",
+				Run:   peer.Payments.AccountFreeze.Run,
+				Close: peer.Payments.AccountFreeze.Close,
 			})
-			peer.Debug.Server.Panel.Add(
-				debug.Cycle("Graceful Exit", peer.GracefulExit.Chore.Loop))
 		}
 	}
 
-	{ // setup metrics service
-		log := peer.Log.Named("metrics")
-		if config.Metrics.UseRangedLoop {
-			log.Info("using ranged loop")
-		} else {
-			peer.Metrics.Chore = metrics.NewChore(
-				log,
-				config.Metrics,
-				peer.Metainfo.SegmentLoop,
-			)
+	// setup console DB cleanup service
+	if config.ConsoleDBCleanup.Enabled {
+		peer.ConsoleDBCleanup.Chore = dbcleanup.NewChore(
+			peer.Log.Named("console.dbcleanup:chore"),
+			peer.DB.Console(),
+			config.ConsoleDBCleanup,
+		)
+
+		peer.Services.Add(lifecycle.Item{
+			Name:  "dbcleanup:chore",
+			Run:   peer.ConsoleDBCleanup.Chore.Run,
+			Close: peer.ConsoleDBCleanup.Chore.Close,
+		})
+	}
+
+	{
+		if config.RepairQueueCheck.Interval.Seconds() > 0 {
+			peer.RepairQueueStat.Chore = repairer.NewQueueStat(log, monkit.Default, placement.SupportedPlacements(), db.RepairQueue(), config.RepairQueueCheck.Interval)
+
 			peer.Services.Add(lifecycle.Item{
-				Name:  "metrics",
-				Run:   peer.Metrics.Chore.Run,
-				Close: peer.Metrics.Chore.Close,
+				Name: "queue-stat",
+				Run:  peer.RepairQueueStat.Chore.Run,
 			})
-			peer.Debug.Server.Panel.Add(
-				debug.Cycle("Metrics", peer.Metrics.Chore.Loop))
 		}
+	}
+
+	{ // setup garbage collection
+		peer.GarbageCollection.Sender = sender.NewService(
+			peer.Log.Named("gc-sender"),
+			config.GarbageCollection,
+			peer.Dialer,
+			peer.Overlay.DB,
+		)
+
+		peer.Services.Add(lifecycle.Item{
+			Name: "gc-sender",
+			Run:  peer.GarbageCollection.Sender.Run,
+		})
+		peer.Debug.Server.Panel.Add(
+			debug.Cycle("Garbage Collection", peer.GarbageCollection.Sender.Loop))
 	}
 
 	return peer, nil

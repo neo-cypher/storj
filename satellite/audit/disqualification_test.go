@@ -48,7 +48,7 @@ func TestDisqualificationTooManyFailedAudits(t *testing.T) {
 			satellitePeer = planet.Satellites[0]
 			nodeID        = planet.StorageNodes[0].ID()
 			report        = audit.Report{
-				Fails: storj.NodeIDList{nodeID},
+				Fails: metabase.Pieces{{StorageNode: nodeID}},
 			}
 		)
 		satellitePeer.Audit.Worker.Loop.Pause()
@@ -140,7 +140,7 @@ func TestDisqualifiedNodesGetNoDownload(t *testing.T) {
 		err = satellitePeer.Reputation.Service.TestDisqualifyNode(ctx, disqualifiedNode, overlay.DisqualificationReasonUnknown)
 		require.NoError(t, err)
 
-		limits, _, err := satellitePeer.Orders.Service.CreateGetOrderLimits(ctx, bucket, segment, 0)
+		limits, _, err := satellitePeer.Orders.Service.CreateGetOrderLimits(ctx, bucket, segment, 0, 0)
 		require.NoError(t, err)
 
 		notNilLimits := []*pb.AddressedOrderLimit{}

@@ -16,11 +16,11 @@ import (
 	"storj.io/common/rpc/rpcstatus"
 	"storj.io/common/testcontext"
 	"storj.io/common/testrand"
-	"storj.io/storj/private/testblobs"
 	"storj.io/storj/private/testplanet"
 	"storj.io/storj/satellite"
 	"storj.io/storj/satellite/overlay"
 	"storj.io/storj/storagenode"
+	"storj.io/storj/storagenode/blobstore/testblobs"
 	"storj.io/storj/storagenode/gracefulexit"
 )
 
@@ -31,7 +31,13 @@ func TestWorkerSuccess(t *testing.T) {
 		StorageNodeCount: successThreshold + 1,
 		UplinkCount:      1,
 		Reconfigure: testplanet.Reconfigure{
-			Satellite: testplanet.ReconfigureRS(2, 3, successThreshold, successThreshold),
+			Satellite: testplanet.Combine(
+				testplanet.ReconfigureRS(2, 3, successThreshold, successThreshold),
+				func(log *zap.Logger, index int, config *satellite.Config) {
+					// this test can be removed entirely when we are using time-based GE everywhere.
+					config.GracefulExit.TimeBased = false
+				},
+			),
 			StorageNode: func(index int, config *storagenode.Config) {
 				config.GracefulExit.NumWorkers = 2
 				config.GracefulExit.NumConcurrentTransfers = 2
@@ -42,8 +48,6 @@ func TestWorkerSuccess(t *testing.T) {
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
 		satellite := planet.Satellites[0]
 		ul := planet.Uplinks[0]
-
-		satellite.GracefulExit.Chore.Loop.Pause()
 
 		err := ul.Upload(ctx, satellite, "testbucket", "test/path1", testrand.Bytes(5*memory.KiB))
 		require.NoError(t, err)
@@ -59,9 +63,9 @@ func TestWorkerSuccess(t *testing.T) {
 		_, err = satellite.Overlay.DB.UpdateExitStatus(ctx, &exitStatusReq)
 		require.NoError(t, err)
 
-		// run the satellite chore to build the transfer queue.
-		satellite.GracefulExit.Chore.Loop.TriggerWait()
-		satellite.GracefulExit.Chore.Loop.Pause()
+		// run the satellite ranged loop to build the transfer queue.
+		_, err = satellite.RangedLoop.RangedLoop.Service.RunOnce(ctx)
+		require.NoError(t, err)
 
 		// check that the satellite knows the storage node is exiting.
 		exitingNodes, err := satellite.DB.OverlayCache().GetExitingNodes(ctx)
@@ -100,7 +104,13 @@ func TestWorkerTimeout(t *testing.T) {
 			StorageNodeDB: func(index int, db storagenode.DB, log *zap.Logger) (storagenode.DB, error) {
 				return testblobs.NewSlowDB(log.Named("slowdb"), db), nil
 			},
-			Satellite: testplanet.ReconfigureRS(2, 3, successThreshold, successThreshold),
+			Satellite: testplanet.Combine(
+				testplanet.ReconfigureRS(2, 3, successThreshold, successThreshold),
+				func(log *zap.Logger, index int, config *satellite.Config) {
+					// this test can be removed entirely when we are using time-based GE everywhere.
+					config.GracefulExit.TimeBased = false
+				},
+			),
 			StorageNode: func(index int, config *storagenode.Config) {
 				config.GracefulExit.NumWorkers = 2
 				config.GracefulExit.NumConcurrentTransfers = 2
@@ -113,8 +123,6 @@ func TestWorkerTimeout(t *testing.T) {
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
 		satellite := planet.Satellites[0]
 		ul := planet.Uplinks[0]
-
-		satellite.GracefulExit.Chore.Loop.Pause()
 
 		err := ul.Upload(ctx, satellite, "testbucket", "test/path1", testrand.Bytes(5*memory.KiB))
 		require.NoError(t, err)
@@ -130,9 +138,9 @@ func TestWorkerTimeout(t *testing.T) {
 		_, err = satellite.Overlay.DB.UpdateExitStatus(ctx, &exitStatusReq)
 		require.NoError(t, err)
 
-		// run the satellite chore to build the transfer queue.
-		satellite.GracefulExit.Chore.Loop.TriggerWait()
-		satellite.GracefulExit.Chore.Loop.Pause()
+		// run the satellite ranged loop to build the transfer queue.
+		_, err = satellite.RangedLoop.RangedLoop.Service.RunOnce(ctx)
+		require.NoError(t, err)
 
 		// check that the satellite knows the storage node is exiting.
 		exitingNodes, err := satellite.DB.OverlayCache().GetExitingNodes(ctx)
@@ -167,6 +175,11 @@ func TestWorkerTimeout(t *testing.T) {
 }
 
 func TestWorkerFailure_IneligibleNodeAge(t *testing.T) {
+	t.Run("TimeBased=true", func(t *testing.T) { testWorkerFailure_IneligibleNodeAge(t, true) })
+	t.Run("TimeBased=false", func(t *testing.T) { testWorkerFailure_IneligibleNodeAge(t, false) })
+}
+
+func testWorkerFailure_IneligibleNodeAge(t *testing.T, timeBased bool) {
 	const successThreshold = 4
 	testplanet.Run(t, testplanet.Config{
 		SatelliteCount:   1,
@@ -177,6 +190,7 @@ func TestWorkerFailure_IneligibleNodeAge(t *testing.T) {
 				func(log *zap.Logger, index int, config *satellite.Config) {
 					// Set the required node age to 1 month.
 					config.GracefulExit.NodeMinAgeInMonths = 1
+					config.GracefulExit.TimeBased = timeBased
 				},
 				testplanet.ReconfigureRS(2, 3, successThreshold, successThreshold),
 			),
@@ -191,8 +205,6 @@ func TestWorkerFailure_IneligibleNodeAge(t *testing.T) {
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
 		satellite := planet.Satellites[0]
 		ul := planet.Uplinks[0]
-
-		satellite.GracefulExit.Chore.Loop.Pause()
 
 		err := ul.Upload(ctx, satellite, "testbucket", "test/path1", testrand.Bytes(5*memory.KiB))
 		require.NoError(t, err)

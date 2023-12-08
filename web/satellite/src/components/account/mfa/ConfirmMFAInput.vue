@@ -4,7 +4,7 @@
 <template>
     <div class="confirm-mfa">
         <label for="confirm-mfa" class="confirm-mfa__label">
-            <span class="confirm-mfa__label__info">{{ isRecovery ? 'Recovery Code' : '2FA Code' }}</span>
+            <span class="confirm-mfa__label__info">{{ label || (isRecovery ? 'Recovery Code' : '2FA Code') }}</span>
             <span v-if="isError" class="confirm-mfa__label__error">Invalid code. Please re-enter.</span>
         </label>
         <input
@@ -19,29 +19,32 @@
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Prop, Vue } from 'vue-property-decorator';
+<script setup lang="ts">
+import { ref } from 'vue';
 
-// @vue/component
-@Component
-export default class ConfirmMFAInput extends Vue {
-    @Prop({ default: () => () => {} })
-    public readonly onInput: (value: string) => void;
-    @Prop({ default: false })
-    public readonly isRecovery: boolean;
-    @Prop({ default: false })
-    public readonly isError: boolean;
+const props = withDefaults(defineProps<{
+    onInput: (value: string) => void;
+    label?: string;
+    isRecovery?: boolean;
+    isError: boolean;
+}>(), {
+    onInput: () => {},
+    label: '',
+    isRecovery: false,
+    isError: false,
+});
 
-    public code = '';
+const code = ref<string>('');
 
-    /**
-     * Clears input.
-     * Is used outside of this component.
-     */
-    public clearInput(): void {
-        this.code = '';
-    }
+/**
+ * Clears input.
+ * Is used outside of this component.
+ */
+function clearInput(): void {
+    code.value = '';
 }
+
+defineExpose({ clearInput });
 </script>
 
 <style scoped lang="scss">

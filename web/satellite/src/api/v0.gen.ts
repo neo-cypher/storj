@@ -2,17 +2,19 @@
 // DO NOT EDIT.
 
 import { HttpClient } from '@/utils/httpClient';
+import { MemorySize, Time, UUID } from '@/types/common';
 
-class APIKeyInfo {
-    id: string;
-    projectId: string;
-    userAgent: string;
+export class APIKeyInfo {
+    id: UUID;
+    projectId: UUID;
+    projectPublicId: UUID;
+    userAgent: string | null;
     name: string;
-    createdAt: string;
+    createdAt: Time;
 }
 
-class APIKeyPage {
-    apiKeys: APIKeyInfo[];
+export class APIKeyPage {
+    apiKeys: APIKeyInfo[] | null;
     search: string;
     limit: number;
     order: number;
@@ -23,8 +25,8 @@ class APIKeyPage {
     totalCount: number;
 }
 
-class BucketUsageRollup {
-    projectID: string;
+export class BucketUsageRollup {
+    projectID: UUID;
     bucketName: string;
     totalStoredData: number;
     totalSegments: number;
@@ -33,53 +35,46 @@ class BucketUsageRollup {
     repairEgress: number;
     getEgress: number;
     auditEgress: number;
-    since: string;
-    before: string;
+    since: Time;
+    before: Time;
 }
 
-class CreateAPIKeyRequest {
+export class CreateAPIKeyRequest {
     projectID: string;
     name: string;
 }
 
-class CreateAPIKeyResponse {
+export class CreateAPIKeyResponse {
     key: string;
-    keyInfo: APIKeyInfo;
+    keyInfo: APIKeyInfo | null;
 }
 
-class Project {
-    id: string;
-    publicId: string;
+export class Project {
+    id: UUID;
+    publicId: UUID;
     name: string;
     description: string;
-    userAgent: string;
-    ownerId: string;
-    rateLimit: number;
-    burstLimit: number;
-    maxBuckets: number;
-    createdAt: string;
+    userAgent: string | null;
+    ownerId: UUID;
+    rateLimit: number | null;
+    burstLimit: number | null;
+    maxBuckets: number | null;
+    createdAt: Time;
     memberCount: number;
-    storageLimit: string;
-    bandwidthLimit: string;
-    userSpecifiedStorageLimit: string;
-    userSpecifiedBandwidthLimit: string;
-    segmentLimit: number;
+    storageLimit: MemorySize | null;
+    bandwidthLimit: MemorySize | null;
+    userSpecifiedStorageLimit: MemorySize | null;
+    userSpecifiedBandwidthLimit: MemorySize | null;
+    segmentLimit: number | null;
+    defaultPlacement: number;
 }
 
-class ProjectInfo {
-    name: string;
-    description: string;
-    storageLimit: string;
-    bandwidthLimit: string;
-    createdAt: string;
-}
-
-class ResponseUser {
-    id: string;
+export class ResponseUser {
+    id: UUID;
     fullName: string;
     shortName: string;
     email: string;
-    userAgent: string;
+    userAgent: string | null;
     projectLimit: number;
     isProfessional: boolean;
     position: string;
@@ -91,118 +86,149 @@ class ResponseUser {
     mfaRecoveryCodeCount: number;
 }
 
-export class projectsHttpApiV0 {
+export class UpsertProjectInfo {
+    name: string;
+    description: string;
+    storageLimit: MemorySize;
+    bandwidthLimit: MemorySize;
+    createdAt: Time;
+}
+
+class APIError extends Error {
+    constructor(
+        public readonly msg: string,
+        public readonly responseStatusCode?: number,
+    ) {
+        super(msg);
+    }
+}
+
+export class ProjectManagementHttpApiV0 {
     private readonly http: HttpClient = new HttpClient();
     private readonly ROOT_PATH: string = '/api/v0/projects';
 
-    public async createProject(request: ProjectInfo): Promise<Project> {
-        const path = `${this.ROOT_PATH}/create`;
-        const response = await this.http.post(path, JSON.stringify(request));
+    public async createProject(request: UpsertProjectInfo): Promise<Project> {
+        const fullPath = `${this.ROOT_PATH}/create`;
+        const response = await this.http.post(fullPath, JSON.stringify(request));
         if (response.ok) {
             return response.json().then((body) => body as Project);
         }
         const err = await response.json();
-        throw new Error(err.error);
+        throw new APIError(err.error, response.status);
     }
 
-    public async updateProject(request: ProjectInfo, id: string): Promise<Project> {
-        const path = `${this.ROOT_PATH}/update/${id}`;
-        const response = await this.http.patch(path, JSON.stringify(request));
+    public async updateProject(request: UpsertProjectInfo, id: UUID): Promise<Project> {
+        const fullPath = `${this.ROOT_PATH}/update/${id}`;
+        const response = await this.http.patch(fullPath, JSON.stringify(request));
         if (response.ok) {
             return response.json().then((body) => body as Project);
         }
         const err = await response.json();
-        throw new Error(err.error);
+        throw new APIError(err.error, response.status);
     }
 
-    public async deleteProject(id: string): Promise<void> {
-        const path = `${this.ROOT_PATH}/delete/${id}`;
-        const response = await this.http.delete(path);
+    public async deleteProject(id: UUID): Promise<void> {
+        const fullPath = `${this.ROOT_PATH}/delete/${id}`;
+        const response = await this.http.delete(fullPath);
         if (response.ok) {
             return;
         }
         const err = await response.json();
-        throw new Error(err.error);
+        throw new APIError(err.error, response.status);
     }
 
-    public async getProjects(): Promise<Array<Project>> {
-        const path = `${this.ROOT_PATH}/`;
-        const response = await this.http.get(path);
+    public async getProjects(): Promise<Project[]> {
+        const fullPath = `${this.ROOT_PATH}/`;
+        const response = await this.http.get(fullPath);
         if (response.ok) {
-            return response.json().then((body) => body as Array<Project>);
+            return response.json().then((body) => body as Project[]);
         }
         const err = await response.json();
-        throw new Error(err.error);
+        throw new APIError(err.error, response.status);
     }
 
-    public async getBucketRollup(projectID: string, bucket: string, since: string, before: string): Promise<BucketUsageRollup> {
-        const path = `${this.ROOT_PATH}/bucket-rollup?projectID=${projectID}&bucket=${bucket}&since=${since}&before=${before}`;
-        const response = await this.http.get(path);
+    public async getBucketRollup(projectID: UUID, bucket: string, since: Time, before: Time): Promise<BucketUsageRollup> {
+        const u = new URL(`${this.ROOT_PATH}/bucket-rollup`, window.location.href);
+        u.searchParams.set('projectID', projectID);
+        u.searchParams.set('bucket', bucket);
+        u.searchParams.set('since', since);
+        u.searchParams.set('before', before);
+        const fullPath = u.toString();
+        const response = await this.http.get(fullPath);
         if (response.ok) {
             return response.json().then((body) => body as BucketUsageRollup);
         }
         const err = await response.json();
-        throw new Error(err.error);
+        throw new APIError(err.error, response.status);
     }
 
-    public async getBucketRollups(projectID: string, since: string, before: string): Promise<Array<BucketUsageRollup>> {
-        const path = `${this.ROOT_PATH}/bucket-rollups?projectID=${projectID}&since=${since}&before=${before}`;
-        const response = await this.http.get(path);
+    public async getBucketRollups(projectID: UUID, since: Time, before: Time): Promise<BucketUsageRollup[]> {
+        const u = new URL(`${this.ROOT_PATH}/bucket-rollups`, window.location.href);
+        u.searchParams.set('projectID', projectID);
+        u.searchParams.set('since', since);
+        u.searchParams.set('before', before);
+        const fullPath = u.toString();
+        const response = await this.http.get(fullPath);
         if (response.ok) {
-            return response.json().then((body) => body as Array<BucketUsageRollup>);
+            return response.json().then((body) => body as BucketUsageRollup[]);
         }
         const err = await response.json();
-        throw new Error(err.error);
+        throw new APIError(err.error, response.status);
     }
 
-    public async getAPIKeys(projectID: string, search: string, limit: number, page: number, order: number, orderDirection: number): Promise<APIKeyPage> {
-        const path = `${this.ROOT_PATH}/apikeys/${projectID}?search=${search}&limit=${limit}&page=${page}&order=${order}&orderDirection=${orderDirection}`;
-        const response = await this.http.get(path);
+    public async getAPIKeys(projectID: UUID, search: string, limit: number, page: number, order: number, orderDirection: number): Promise<APIKeyPage> {
+        const u = new URL(`${this.ROOT_PATH}/apikeys/${projectID}`, window.location.href);
+        u.searchParams.set('search', search);
+        u.searchParams.set('limit', limit);
+        u.searchParams.set('page', page);
+        u.searchParams.set('order', order);
+        u.searchParams.set('orderDirection', orderDirection);
+        const fullPath = u.toString();
+        const response = await this.http.get(fullPath);
         if (response.ok) {
             return response.json().then((body) => body as APIKeyPage);
         }
         const err = await response.json();
-        throw new Error(err.error);
+        throw new APIError(err.error, response.status);
     }
-
 }
-export class apikeysHttpApiV0 {
+
+export class APIKeyManagementHttpApiV0 {
     private readonly http: HttpClient = new HttpClient();
     private readonly ROOT_PATH: string = '/api/v0/apikeys';
 
     public async createAPIKey(request: CreateAPIKeyRequest): Promise<CreateAPIKeyResponse> {
-        const path = `${this.ROOT_PATH}/create`;
-        const response = await this.http.post(path, JSON.stringify(request));
+        const fullPath = `${this.ROOT_PATH}/create`;
+        const response = await this.http.post(fullPath, JSON.stringify(request));
         if (response.ok) {
             return response.json().then((body) => body as CreateAPIKeyResponse);
         }
         const err = await response.json();
-        throw new Error(err.error);
+        throw new APIError(err.error, response.status);
     }
 
-    public async deleteAPIKey(id: string): Promise<void> {
-        const path = `${this.ROOT_PATH}/delete/${id}`;
-        const response = await this.http.delete(path);
+    public async deleteAPIKey(id: UUID): Promise<void> {
+        const fullPath = `${this.ROOT_PATH}/delete/${id}`;
+        const response = await this.http.delete(fullPath);
         if (response.ok) {
             return;
         }
         const err = await response.json();
-        throw new Error(err.error);
+        throw new APIError(err.error, response.status);
     }
-
 }
-export class usersHttpApiV0 {
+
+export class UserManagementHttpApiV0 {
     private readonly http: HttpClient = new HttpClient();
     private readonly ROOT_PATH: string = '/api/v0/users';
 
     public async getUser(): Promise<ResponseUser> {
-        const path = `${this.ROOT_PATH}/`;
-        const response = await this.http.get(path);
+        const fullPath = `${this.ROOT_PATH}/`;
+        const response = await this.http.get(fullPath);
         if (response.ok) {
             return response.json().then((body) => body as ResponseUser);
         }
         const err = await response.json();
-        throw new Error(err.error);
+        throw new APIError(err.error, response.status);
     }
-
 }

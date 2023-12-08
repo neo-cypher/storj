@@ -9,21 +9,20 @@ import (
 	"sort"
 
 	"storj.io/storj/satellite/metabase/rangedloop"
-	"storj.io/storj/satellite/metabase/segmentloop"
 )
 
 var _ rangedloop.RangeSplitter = (*RangeSplitter)(nil)
 
 // RangeSplitter allows to iterate over segments from an in-memory source.
 type RangeSplitter struct {
-	Segments []segmentloop.Segment
+	Segments []rangedloop.Segment
 }
 
 var _ rangedloop.SegmentProvider = (*SegmentProvider)(nil)
 
 // SegmentProvider allows to iterate over segments from an in-memory source.
 type SegmentProvider struct {
-	Segments []segmentloop.Segment
+	Segments []rangedloop.Segment
 
 	batchSize int
 }
@@ -50,8 +49,13 @@ func (m *RangeSplitter) CreateRanges(nRanges int, batchSize int) ([]rangedloop.S
 	return rangeProviders, nil
 }
 
+// Range returns range which is processed by this provider.
+func (m *SegmentProvider) Range() rangedloop.UUIDRange {
+	return rangedloop.UUIDRange{}
+}
+
 // Iterate allows to loop over the segments stored in the provider.
-func (m *SegmentProvider) Iterate(ctx context.Context, fn func([]segmentloop.Segment) error) error {
+func (m *SegmentProvider) Iterate(ctx context.Context, fn func([]rangedloop.Segment) error) error {
 	for offset := 0; offset < len(m.Segments); offset += m.batchSize {
 		end := min(offset+m.batchSize, len(m.Segments))
 		err := fn(m.Segments[offset:end])
@@ -70,9 +74,9 @@ func min(x, y int) int {
 	return y
 }
 
-func streamsFromSegments(segments []segmentloop.Segment) [][]segmentloop.Segment {
+func streamsFromSegments(segments []rangedloop.Segment) [][]rangedloop.Segment {
 	// Duplicate and sort the segments by stream ID
-	segments = append([]segmentloop.Segment(nil), segments...)
+	segments = append([]rangedloop.Segment(nil), segments...)
 	sort.Slice(segments, func(i int, j int) bool {
 		idcmp := segments[i].StreamID.Compare(segments[j].StreamID)
 		switch {
@@ -85,8 +89,8 @@ func streamsFromSegments(segments []segmentloop.Segment) [][]segmentloop.Segment
 		}
 	})
 	// Break up the sorted segments into streams
-	var streams [][]segmentloop.Segment
-	var stream []segmentloop.Segment
+	var streams [][]rangedloop.Segment
+	var stream []rangedloop.Segment
 	for _, segment := range segments {
 		if len(stream) > 0 && stream[0].StreamID != segment.StreamID {
 			// Stream ID changed; push and reset stream
@@ -103,8 +107,8 @@ func streamsFromSegments(segments []segmentloop.Segment) [][]segmentloop.Segment
 	return streams
 }
 
-func segmentsFromStreams(streams [][]segmentloop.Segment) []segmentloop.Segment {
-	var segments []segmentloop.Segment
+func segmentsFromStreams(streams [][]rangedloop.Segment) []rangedloop.Segment {
+	var segments []rangedloop.Segment
 	for _, stream := range streams {
 		segments = append(segments, stream...)
 	}

@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgconn"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/errs"
@@ -273,23 +273,6 @@ func migrateTest(t *testing.T, connStr string) {
 
 		// keep the last version around
 		finalSchema = currentSchema
-	}
-
-	// TODO(thepaul): remove these exceptions on adding migration to remove _gob columns
-	coinpaymentsTransactions, ok := finalSchema.FindTable("coinpayments_transactions")
-	if ok {
-		coinpaymentsTransactions.RemoveColumn("amount_gob")
-		coinpaymentsTransactions.RemoveColumn("received_gob")
-	}
-	conversionRates, ok := finalSchema.FindTable("stripecoinpayments_tx_conversion_rates")
-	if ok {
-		conversionRates.RemoveColumn("rate_gob")
-	}
-
-	// TODO(lizzy): remove this check with the migration step to drop the column last_verification_reminders.
-	users, ok := finalSchema.FindTable("users")
-	if ok {
-		users.RemoveColumn("last_verification_reminder")
 	}
 
 	// verify that we also match the dbx version

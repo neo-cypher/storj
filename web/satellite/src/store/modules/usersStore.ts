@@ -2,56 +2,56 @@
 // See LICENSE for copying information.
 
 import { defineStore } from 'pinia';
-import { computed, reactive } from 'vue';
+import { computed, reactive, readonly } from 'vue';
 
-import { DisableMFARequest, UpdatedUser, User, UsersApi } from '@/types/users';
-import { MetaUtils } from '@/utils/meta';
+import {
+    DisableMFARequest,
+    SetUserSettingsData,
+    UpdatedUser,
+    User,
+    UsersApi,
+    UserSettings,
+} from '@/types/users';
 import { AuthHttpApi } from '@/api/auth';
+import { useConfigStore } from '@/store/modules/configStore';
+
+export const DEFAULT_USER_SETTINGS = readonly(new UserSettings());
 
 export class UsersState {
     public user: User = new User();
+    public settings: Readonly<UserSettings> = DEFAULT_USER_SETTINGS;
     public userMFASecret = '';
     public userMFARecoveryCodes: string[] = [];
 }
 
 export const useUsersStore = defineStore('users', () => {
-    const usersState = reactive<UsersState>({
-        user: new User(),
-        userMFASecret: '',
-        userMFARecoveryCodes: [],
-    });
+    const state = reactive<UsersState>(new UsersState());
 
     const userName = computed(() => {
-        return usersState.user.getFullName();
+        return state.user.getFullName();
+    });
+
+    const shouldOnboard = computed(() => {
+        return !state.settings.onboardingStart || (state.settings.onboardingStart && !state.settings.onboardingEnd);
     });
 
     const api: UsersApi = new AuthHttpApi();
 
-    async function updateUserInfo(userInfo: UpdatedUser): Promise<void> {
+    async function updateUser(userInfo: UpdatedUser): Promise<void> {
         await api.update(userInfo);
 
-        usersState.user.fullName = userInfo.fullName;
-        usersState.user.shortName = userInfo.shortName;
+        state.user.fullName = userInfo.fullName;
+        state.user.shortName = userInfo.shortName;
     }
 
-    async function fetchUserInfo(): Promise<void> {
+    async function getUser(): Promise<void> {
+        const configStore = useConfigStore();
+
         const user = await api.get();
+        user.freezeStatus = await api.getFrozenStatus();
+        user.projectLimit ||= configStore.state.config.defaultProjectLimit;
 
-        usersState.user = user;
-
-        if (user.projectLimit === 0) {
-            const limitFromConfig = MetaUtils.getMetaContent('default-project-limit');
-
-            usersState.user.projectLimit = parseInt(limitFromConfig);
-
-            return;
-        }
-
-        usersState.user.projectLimit = user.projectLimit;
-    }
-
-    async function fetchFrozenStatus(): Promise<void> {
-        usersState.user.isFrozen = await api.getFrozenStatus();
+        setUser(user);
     }
 
     async function disableUserMFA(request: DisableMFARequest): Promise<void> {
@@ -63,31 +63,69 @@ export const useUsersStore = defineStore('users', () => {
     }
 
     async function generateUserMFASecret(): Promise<void> {
-        usersState.userMFASecret = await api.generateUserMFASecret();
+        state.userMFASecret = await api.generateUserMFASecret();
     }
 
     async function generateUserMFARecoveryCodes(): Promise<void> {
         const codes = await api.generateUserMFARecoveryCodes();
 
-        usersState.userMFARecoveryCodes = codes;
-        usersState.user.mfaRecoveryCodeCount = codes.length;
+        state.userMFARecoveryCodes = codes;
+        state.user.mfaRecoveryCodeCount = codes.length;
     }
 
-    function clearUserInfo() {
-        usersState.user = new User();
-        usersState.user.projectLimit = 1;
+    async function regenerateUserMFARecoveryCodes(code: { recoveryCode?: string, passcode?: string }): Promise<void> {
+        const codes = await api.regenerateUserMFARecoveryCodes(code.passcode, code.recoveryCode);
+
+        state.userMFARecoveryCodes = codes;
+        state.user.mfaRecoveryCodeCount = codes.length;
+    }
+
+    async function getSettings(): Promise<UserSettings> {
+        const settings = await api.getUserSettings();
+
+        state.settings = settings;
+
+        return settings;
+    }
+
+    async function updateSettings(update: SetUserSettingsData): Promise<void> {
+        state.settings = await api.updateSettings(update);
+    }
+
+    function setUser(user: User): void {
+        state.user = user;
+    }
+
+    async function requestProjectLimitIncrease(limit: string): Promise<void> {
+        await api.requestProjectLimitIncrease(limit);
+    }
+
+    // Does nothing. It is called on login screen, and we just subscribe to this action in dashboard wrappers.
+    function login(): void { }
+
+    function clear() {
+        state.user = new User();
+        state.settings = DEFAULT_USER_SETTINGS;
+        state.userMFASecret = '';
+        state.userMFARecoveryCodes = [];
     }
 
     return {
-        usersState,
+        state,
         userName,
-        updateUserInfo,
-        fetchUserInfo,
+        shouldOnboard,
+        updateUser,
+        getUser,
         disableUserMFA,
         enableUserMFA,
         generateUserMFASecret,
         generateUserMFARecoveryCodes,
-        clearUserInfo,
-        fetchFrozenStatus,
+        regenerateUserMFARecoveryCodes,
+        clear,
+        login,
+        setUser,
+        updateSettings,
+        getSettings,
+        requestProjectLimitIncrease,
     };
 });

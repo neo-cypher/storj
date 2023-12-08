@@ -11,6 +11,7 @@ import (
 	"github.com/zeebo/errs"
 
 	"storj.io/common/memory"
+	"storj.io/common/storj"
 	"storj.io/common/uuid"
 	"storj.io/storj/satellite/console/consoleauth"
 )
@@ -28,25 +29,37 @@ type Users interface {
 	// UpdateFailedLoginCountAndExpiration increments failed_login_count and sets login_lockout_expiration appropriately.
 	UpdateFailedLoginCountAndExpiration(ctx context.Context, failedLoginPenalty *float64, id uuid.UUID) error
 	// GetByEmailWithUnverified is a method for querying users by email from the database.
-	GetByEmailWithUnverified(ctx context.Context, email string) (*User, []User, error)
+	GetByEmailWithUnverified(ctx context.Context, email string) (verified *User, unverified []User, err error)
+	// GetByStatus is a method for querying user by status from the database.
+	GetByStatus(ctx context.Context, status UserStatus, cursor UserCursor) (*UsersPage, error)
 	// GetByEmail is a method for querying user by verified email from the database.
 	GetByEmail(ctx context.Context, email string) (*User, error)
 	// Insert is a method for inserting user into the database.
 	Insert(ctx context.Context, user *User) (*User, error)
-	// Delete is a method for deleting user by Id from the database.
+	// Delete is a method for deleting user by ID from the database.
 	Delete(ctx context.Context, id uuid.UUID) error
+	// DeleteUnverifiedBefore deletes unverified users created prior to some time from the database.
+	DeleteUnverifiedBefore(ctx context.Context, before time.Time, asOfSystemTimeInterval time.Duration, pageSize int) error
 	// Update is a method for updating user entity.
 	Update(ctx context.Context, userID uuid.UUID, request UpdateUserRequest) error
 	// UpdatePaidTier sets whether the user is in the paid tier.
 	UpdatePaidTier(ctx context.Context, id uuid.UUID, paidTier bool, projectBandwidthLimit, projectStorageLimit memory.Size, projectSegmentLimit int64, projectLimit int) error
+	// UpdateUserAgent is a method to update the user's user agent.
+	UpdateUserAgent(ctx context.Context, id uuid.UUID, userAgent []byte) error
 	// UpdateUserProjectLimits is a method to update the user's usage limits for new projects.
 	UpdateUserProjectLimits(ctx context.Context, id uuid.UUID, limits UsageLimits) error
+	// UpdateDefaultPlacement is a method to update the user's default placement for new projects.
+	UpdateDefaultPlacement(ctx context.Context, id uuid.UUID, placement storj.PlacementConstraint) error
 	// GetProjectLimit is a method to get the users project limit
 	GetProjectLimit(ctx context.Context, id uuid.UUID) (limit int, err error)
 	// GetUserProjectLimits is a method to get the users storage and bandwidth limits for new projects.
 	GetUserProjectLimits(ctx context.Context, id uuid.UUID) (limit *ProjectLimits, err error)
 	// GetUserPaidTier is a method to gather whether the specified user is on the Paid Tier or not.
 	GetUserPaidTier(ctx context.Context, id uuid.UUID) (isPaid bool, err error)
+	// GetSettings is a method for returning a user's set of configurations.
+	GetSettings(ctx context.Context, userID uuid.UUID) (*UserSettings, error)
+	// UpsertSettings is a method for updating a user's set of configurations if it exists and inserting it otherwise.
+	UpsertSettings(ctx context.Context, userID uuid.UUID, settings UpsertUserSettingsRequest) error
 }
 
 // UserInfo holds User updatable data.
@@ -55,8 +68,26 @@ type UserInfo struct {
 	ShortName string `json:"shortName"`
 }
 
+// UserCursor holds info for user info cursor pagination.
+type UserCursor struct {
+	Limit uint `json:"limit"`
+	Page  uint `json:"page"`
+}
+
+// UsersPage represent user info page result.
+type UsersPage struct {
+	Users []User `json:"users"`
+
+	Limit  uint   `json:"limit"`
+	Offset uint64 `json:"offset"`
+
+	PageCount   uint   `json:"pageCount"`
+	CurrentPage uint   `json:"currentPage"`
+	TotalCount  uint64 `json:"totalCount"`
+}
+
 // IsValid checks UserInfo validity and returns error describing whats wrong.
-// The returned error has the class ErrValiation.
+// The returned error has the class ErrValidation.
 func (user *UserInfo) IsValid() error {
 	// validate fullName
 	if err := ValidateFullName(user.FullName); err != nil {
@@ -82,17 +113,25 @@ type CreateUser struct {
 	CaptchaResponse  string `json:"captchaResponse"`
 	IP               string `json:"ip"`
 	SignupPromoCode  string `json:"signupPromoCode"`
+	ActivationCode   string `json:"-"`
+	SignupId         string `json:"-"`
+	AllowNoName      bool   `json:"-"`
 }
 
 // IsValid checks CreateUser validity and returns error describing whats wrong.
 // The returned error has the class ErrValiation.
-func (user *CreateUser) IsValid() error {
+func (user *CreateUser) IsValid(allowNoName bool) error {
 	errgrp := errs.Group{}
 
 	errgrp.Add(
-		ValidateFullName(user.FullName),
 		ValidateNewPassword(user.Password),
 	)
+
+	if !allowNoName {
+		errgrp.Add(
+			ValidateFullName(user.FullName),
+		)
+	}
 
 	// validate email
 	_, err := mail.ParseAddress(user.Email)
@@ -129,13 +168,39 @@ type TokenInfo struct {
 type UserStatus int
 
 const (
-	// Inactive is a user status that he receives after registration.
+	// Inactive is a status that user receives after registration.
 	Inactive UserStatus = 0
-	// Active is a user status that he receives after account activation.
+	// Active is a status that user receives after account activation.
 	Active UserStatus = 1
-	// Deleted is a user status that he receives after deleting account.
+	// Deleted is a status that user receives after deleting account.
 	Deleted UserStatus = 2
+	// PendingDeletion is a status that user receives before deleting account.
+	PendingDeletion UserStatus = 3
+	// LegalHold is a status that user receives for legal reasons.
+	LegalHold UserStatus = 4
+	// PendingBotVerification is a status that user receives after account activation but with high captcha score.
+	PendingBotVerification UserStatus = 5
 )
+
+// String returns a string representation of the user status.
+func (s UserStatus) String() string {
+	switch s {
+	case Inactive:
+		return "Inactive"
+	case Active:
+		return "Active"
+	case Deleted:
+		return "Deleted"
+	case PendingDeletion:
+		return "Pending Deletion"
+	case LegalHold:
+		return "Legal Hold"
+	case PendingBotVerification:
+		return "Pending Bot Verification"
+	default:
+		return ""
+	}
+}
 
 // User is a database object that describes User entity.
 type User struct {
@@ -178,6 +243,11 @@ type User struct {
 	FailedLoginCount       int       `json:"failedLoginCount"`
 	LoginLockoutExpiration time.Time `json:"loginLockoutExpiration"`
 	SignupCaptcha          *float64  `json:"-"`
+
+	DefaultPlacement storj.PlacementConstraint `json:"defaultPlacement"`
+
+	ActivationCode string `json:"-"`
+	SignupId       string `json:"-"`
 }
 
 // ResponseUser is an entity which describes db User and can be sent in response.
@@ -223,6 +293,12 @@ type UpdateUserRequest struct {
 	FullName  *string
 	ShortName **string
 
+	Position       *string
+	CompanyName    *string
+	WorkingOn      *string
+	IsProfessional *bool
+	EmployeeCount  *string
+
 	Email        *string
 	PasswordHash []byte
 
@@ -243,4 +319,38 @@ type UpdateUserRequest struct {
 	FailedLoginCount *int
 
 	LoginLockoutExpiration **time.Time
+
+	DefaultPlacement storj.PlacementConstraint
+
+	ActivationCode *string
+	SignupId       *string
+}
+
+// UserSettings contains configurations for a user.
+type UserSettings struct {
+	SessionDuration  *time.Duration `json:"sessionDuration"`
+	OnboardingStart  bool           `json:"onboardingStart"`
+	OnboardingEnd    bool           `json:"onboardingEnd"`
+	PassphrasePrompt bool           `json:"passphrasePrompt"`
+	OnboardingStep   *string        `json:"onboardingStep"`
+}
+
+// UpsertUserSettingsRequest contains all user settings which are configurable via Users.UpsertSettings.
+type UpsertUserSettingsRequest struct {
+	// The DB stores this value with minute granularity. Finer time units are ignored.
+	SessionDuration  **time.Duration
+	OnboardingStart  *bool
+	OnboardingEnd    *bool
+	PassphrasePrompt *bool
+	OnboardingStep   *string
+}
+
+// SetUpAccountRequest holds data for completing account setup.
+type SetUpAccountRequest struct {
+	FullName       string  `json:"fullName"`
+	IsProfessional bool    `json:"isProfessional"`
+	Position       *string `json:"position"`
+	CompanyName    *string `json:"companyName"`
+	EmployeeCount  *string `json:"employeeCount"`
+	StorageNeeds   *string `json:"storageNeeds"`
 }

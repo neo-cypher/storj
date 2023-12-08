@@ -7,14 +7,13 @@ import (
 	"fmt"
 	"go/format"
 	"os"
+	"path/filepath"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/zeebo/errs"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 
 	"storj.io/common/uuid"
 )
@@ -23,10 +22,11 @@ import (
 const DateFormat = "2006-01-02T15:04:05.999Z"
 
 // MustWriteGo writes generated Go code into a file.
+// If an error occurs, it panics.
 func (a *API) MustWriteGo(path string) {
 	generated, err := a.generateGo()
 	if err != nil {
-		panic(errs.Wrap(err))
+		panic(err)
 	}
 
 	err = os.WriteFile(path, generated, 0644)
@@ -37,38 +37,41 @@ func (a *API) MustWriteGo(path string) {
 
 // generateGo generates api code and returns an output.
 func (a *API) generateGo() ([]byte, error) {
-	var result string
+	result := &StringBuilder{}
+	pf := result.Writelnf
 
-	pf := func(format string, a ...interface{}) {
-		result += fmt.Sprintf(format+"\n", a...)
+	if a.PackagePath == "" {
+		return nil, errs.New("Package path must be defined")
 	}
 
-	getPackageName := func(path string) string {
-		pathPackages := strings.Split(path, "/")
-		return pathPackages[len(pathPackages)-1]
+	packageName := a.PackageName
+	if packageName == "" {
+		parts := strings.Split(a.PackagePath, "/")
+		packageName = parts[len(parts)-1]
 	}
 
 	imports := struct {
-		All      map[string]bool
-		Standard []string
-		External []string
-		Internal []string
+		All      map[importPath]bool
+		Standard []importPath
+		External []importPath
+		Internal []importPath
 	}{
-		All: make(map[string]bool),
+		All: make(map[importPath]bool),
 	}
 
 	i := func(paths ...string) {
 		for _, path := range paths {
-			if path == "" || getPackageName(path) == a.PackageName {
+			if path == "" || path == a.PackagePath {
 				continue
 			}
 
-			if _, ok := imports.All[path]; ok {
+			ipath := importPath(path)
+			if _, ok := imports.All[ipath]; ok {
 				continue
 			}
-			imports.All[path] = true
+			imports.All[ipath] = true
 
-			var slice *[]string
+			var slice *[]importPath
 			switch {
 			case !strings.Contains(path, "."):
 				slice = &imports.Standard
@@ -77,32 +80,52 @@ func (a *API) generateGo() ([]byte, error) {
 			default:
 				slice = &imports.External
 			}
-			*slice = append(*slice, path)
+			*slice = append(*slice, ipath)
 		}
+	}
+
+	var getTypePackages func(t reflect.Type) []string
+	getTypePackages = func(t reflect.Type) []string {
+		t = getElementaryType(t)
+		if t.Kind() == reflect.Map {
+			pkgs := []string{getElementaryType(t.Key()).PkgPath()}
+			return append(pkgs, getTypePackages(t.Elem())...)
+		}
+		return []string{t.PkgPath()}
 	}
 
 	for _, group := range a.EndpointGroups {
 		for _, method := range group.endpoints {
 			if method.Request != nil {
-				i(getElementaryType(reflect.TypeOf(method.Request)).PkgPath())
+				i(getTypePackages(reflect.TypeOf(method.Request))...)
 			}
 			if method.Response != nil {
-				i(getElementaryType(reflect.TypeOf(method.Response)).PkgPath())
+				i(getTypePackages(reflect.TypeOf(method.Response))...)
 			}
 		}
 	}
 
 	for _, group := range a.EndpointGroups {
 		i("github.com/zeebo/errs")
-		pf("var Err%sAPI = errs.Class(\"%s %s api\")", cases.Title(language.Und).String(group.Prefix), a.PackageName, group.Prefix)
+		pf(
+			"var Err%sAPI = errs.Class(\"%s %s api\")",
+			capitalize(group.Prefix),
+			packageName,
+			strings.ToLower(group.Prefix),
+		)
+
+		for _, m := range group.Middleware {
+			i(middlewareImports(m)...)
+		}
 	}
 
 	pf("")
 
-	params := make(map[*fullEndpoint][]Param)
+	params := make(map[*FullEndpoint][]Param)
 
 	for _, group := range a.EndpointGroups {
-		pf("type %sService interface {", group.Name)
+		// Define the service interface
+		pf("type %sService interface {", capitalize(group.Name))
 		for _, e := range group.endpoints {
 			params[e] = append(e.PathParams, e.QueryParams...)
 
@@ -122,12 +145,12 @@ func (a *API) generateGo() ([]byte, error) {
 			if e.Response != nil {
 				responseType := reflect.TypeOf(e.Response)
 				returnParam := a.handleTypesPackage(responseType)
-				if responseType == getElementaryType(responseType) {
+				if !isNillableType(responseType) {
 					returnParam = "*" + returnParam
 				}
-				pf("%s(ctx context.Context, "+paramStr+") (%s, api.HTTPError)", e.MethodName, returnParam)
+				pf("%s(ctx context.Context, "+paramStr+") (%s, api.HTTPError)", e.GoName, returnParam)
 			} else {
-				pf("%s(ctx context.Context, "+paramStr+") (api.HTTPError)", e.MethodName)
+				pf("%s(ctx context.Context, "+paramStr+") (api.HTTPError)", e.GoName)
 			}
 		}
 		pf("}")
@@ -135,36 +158,104 @@ func (a *API) generateGo() ([]byte, error) {
 	}
 
 	for _, group := range a.EndpointGroups {
+		cname := capitalize(group.Name)
 		i("go.uber.org/zap", "github.com/spacemonkeygo/monkit/v3")
-		pf("// %sHandler is an api handler that exposes all %s related functionality.", group.Name, group.Prefix)
-		pf("type %sHandler struct {", group.Name)
+		pf(
+			"// %sHandler is an api handler that implements all %s API endpoints functionality.",
+			cname,
+			group.Name,
+		)
+		pf("type %sHandler struct {", cname)
 		pf("log *zap.Logger")
 		pf("mon *monkit.Scope")
-		pf("service %sService", group.Name)
-		pf("auth api.Auth")
+		pf("service %sService", cname)
+
+		autodefinedFields := map[string]string{"log": "*zap.Logger", "mon": "*monkit.Scope", "service": cname + "Service"}
+		for _, m := range group.Middleware {
+			for _, f := range middlewareFields(a, m) {
+				if t, ok := autodefinedFields[f.Name]; ok {
+					if t != f.Type {
+						panic(
+							fmt.Sprintf(
+								"middleware %q has a field with name %q and type %q which clashes with another defined field with the same name but with type %q",
+								reflect.TypeOf(m).Name(),
+								f.Name,
+								f.Type,
+								t,
+							),
+						)
+					}
+
+					continue
+				}
+				autodefinedFields[f.Name] = f.Type
+				pf("%s %s", f.Name, f.Type)
+			}
+		}
+
 		pf("}")
 		pf("")
 	}
 
 	for _, group := range a.EndpointGroups {
+		cname := capitalize(group.Name)
 		i("github.com/gorilla/mux")
-		pf(
-			"func New%s(log *zap.Logger, mon *monkit.Scope, service %sService, router *mux.Router, auth api.Auth) *%sHandler {",
-			group.Name,
-			group.Name,
-			group.Name,
-		)
-		pf("handler := &%sHandler{", group.Name)
+
+		autodedefined := map[string]struct{}{"log": {}, "mon": {}, "service": {}}
+		middlewareArgs := make([]string, 0, len(group.Middleware))
+		middlewareFieldsList := make([]string, 0, len(group.Middleware))
+		for _, m := range group.Middleware {
+			for _, f := range middlewareFields(a, m) {
+				if _, ok := autodedefined[f.Name]; !ok {
+					middlewareArgs = append(middlewareArgs, fmt.Sprintf("%s %s", f.Name, f.Type))
+					middlewareFieldsList = append(middlewareFieldsList, fmt.Sprintf("%[1]s: %[1]s", f.Name))
+				}
+			}
+		}
+
+		if len(middlewareArgs) > 0 {
+			pf(
+				"func New%s(log *zap.Logger, mon *monkit.Scope, service %sService, router *mux.Router, %s) *%sHandler {",
+				cname,
+				cname,
+				strings.Join(middlewareArgs, ", "),
+				cname,
+			)
+		} else {
+			pf(
+				"func New%s(log *zap.Logger, mon *monkit.Scope, service %sService, router *mux.Router) *%sHandler {",
+				cname,
+				cname,
+				cname,
+			)
+		}
+
+		pf("handler := &%sHandler{", cname)
 		pf("log: log,")
 		pf("mon: mon,")
 		pf("service: service,")
-		pf("auth: auth,")
+
+		if len(middlewareFieldsList) > 0 {
+			pf(strings.Join(middlewareFieldsList, ",") + ",")
+		}
+
 		pf("}")
 		pf("")
-		pf("%sRouter := router.PathPrefix(\"/api/v0/%s\").Subrouter()", group.Prefix, group.Prefix)
+		pf(
+			"%sRouter := router.PathPrefix(\"%s/%s\").Subrouter()",
+			uncapitalize(group.Prefix),
+			a.endpointBasePath(),
+			strings.ToLower(group.Prefix),
+		)
 		for _, endpoint := range group.endpoints {
-			handlerName := "handle" + endpoint.MethodName
-			pf("%sRouter.HandleFunc(\"%s\", handler.%s).Methods(\"%s\")", group.Prefix, endpoint.Path, handlerName, endpoint.Method)
+			handlerName := "handle" + endpoint.GoName
+			pf(
+				"%sRouter.HandleFunc(\"%s\", handler.%s).Methods(\"%s\")",
+				uncapitalize(group.Prefix),
+				endpoint.Path,
+				handlerName,
+				endpoint.Method,
+			)
 		}
 		pf("")
 		pf("return handler")
@@ -176,17 +267,16 @@ func (a *API) generateGo() ([]byte, error) {
 		for _, endpoint := range group.endpoints {
 			i("net/http")
 			pf("")
-			handlerName := "handle" + endpoint.MethodName
-			pf("func (h *%sHandler) %s(w http.ResponseWriter, r *http.Request) {", group.Name, handlerName)
+			handlerName := "handle" + endpoint.GoName
+			pf("func (h *%sHandler) %s(w http.ResponseWriter, r *http.Request) {", capitalize(group.Name), handlerName)
 			pf("ctx := r.Context()")
 			pf("var err error")
 			pf("defer h.mon.Task()(&ctx)(&err)")
 			pf("")
-
 			pf("w.Header().Set(\"Content-Type\", \"application/json\")")
 			pf("")
 
-			if err := handleParams(pf, i, endpoint.PathParams, endpoint.QueryParams); err != nil {
+			if err := handleParams(result, i, endpoint.PathParams, endpoint.QueryParams); err != nil {
 				return nil, err
 			}
 
@@ -194,17 +284,10 @@ func (a *API) generateGo() ([]byte, error) {
 				handleBody(pf, endpoint.Request)
 			}
 
-			if !endpoint.NoCookieAuth || !endpoint.NoAPIAuth {
-				pf("ctx, err = h.auth.IsAuthenticated(ctx, r, %v, %v)", !endpoint.NoCookieAuth, !endpoint.NoAPIAuth)
-				pf("if err != nil {")
-				if !endpoint.NoCookieAuth {
-					pf("h.auth.RemoveAuthCookie(w)")
-				}
-				pf("api.ServeError(h.log, w, http.StatusUnauthorized, err)")
-				pf("return")
-				pf("}")
-				pf("")
+			for _, m := range group.Middleware {
+				pf(m.Generate(a, group, endpoint))
 			}
+			pf("")
 
 			var methodFormat string
 			if endpoint.Response != nil {
@@ -221,7 +304,7 @@ func (a *API) generateGo() ([]byte, error) {
 			}
 
 			methodFormat += ")"
-			pf(methodFormat, endpoint.MethodName)
+			pf(methodFormat, endpoint.GoName)
 			pf("if httpErr.Err != nil {")
 			pf("api.ServeError(h.log, w, httpErr.Status, httpErr.Err)")
 			if endpoint.Response == nil {
@@ -236,29 +319,39 @@ func (a *API) generateGo() ([]byte, error) {
 			pf("")
 			pf("err = json.NewEncoder(w).Encode(retVal)")
 			pf("if err != nil {")
-			pf("h.log.Debug(\"failed to write json %s response\", zap.Error(Err%sAPI.Wrap(err)))", endpoint.MethodName, cases.Title(language.Und).String(group.Prefix))
+			pf(
+				"h.log.Debug(\"failed to write json %s response\", zap.Error(Err%sAPI.Wrap(err)))",
+				endpoint.GoName,
+				capitalize(group.Prefix),
+			)
 			pf("}")
 			pf("}")
 		}
 	}
 
-	fileBody := result
-	result = ""
+	fileBody := result.String()
+	result = &StringBuilder{}
+	pf = result.Writelnf
 
 	pf("// AUTOGENERATED BY private/apigen")
 	pf("// DO NOT EDIT.")
 	pf("")
 
-	pf("package %s", a.PackageName)
+	pf("package %s", packageName)
 	pf("")
 
 	pf("import (")
-	slices := [][]string{imports.Standard, imports.External, imports.Internal}
-	for sn, slice := range slices {
-		sort.Strings(slice)
+	all := [][]importPath{imports.Standard, imports.External, imports.Internal}
+	for sn, slice := range all {
+		slices.Sort(slice)
 		for pn, path := range slice {
-			pf(`"%s"`, path)
-			if pn == len(slice)-1 && sn < len(slices)-1 {
+			if r, ok := path.PkgName(); ok {
+				pf(`%s "%s"`, r, path)
+			} else {
+				pf(`"%s"`, path)
+			}
+
+			if pn == len(slice)-1 && sn < len(all)-1 {
 				pf("")
 			}
 		}
@@ -271,11 +364,11 @@ func (a *API) generateGo() ([]byte, error) {
 		pf("")
 	}
 
-	result += fileBody
+	result.WriteString(fileBody)
 
-	output, err := format.Source([]byte(result))
+	output, err := format.Source([]byte(result.String()))
 	if err != nil {
-		return nil, err
+		return nil, errs.Wrap(err)
 	}
 
 	return output, nil
@@ -285,15 +378,25 @@ func (a *API) generateGo() ([]byte, error) {
 // If type is from the same package then we use only type's name.
 // If type is from external package then we use type along with its appropriate package name.
 func (a *API) handleTypesPackage(t reflect.Type) string {
-	if strings.HasPrefix(t.String(), a.PackageName) {
-		return t.Elem().Name()
+	switch t.Kind() {
+	case reflect.Array:
+		return fmt.Sprintf("[%d]%s", t.Len(), a.handleTypesPackage(t.Elem()))
+	case reflect.Slice:
+		return "[]" + a.handleTypesPackage(t.Elem())
+	case reflect.Pointer:
+		return "*" + a.handleTypesPackage(t.Elem())
+	}
+
+	if t.PkgPath() == a.PackagePath {
+		return t.Name()
 	}
 
 	return t.String()
 }
 
 // handleParams handles parsing of URL path parameters or query parameters.
-func handleParams(pf func(format string, a ...interface{}), i func(paths ...string), pathParams, queryParams []Param) error {
+func handleParams(builder *StringBuilder, i func(paths ...string), pathParams, queryParams []Param) error {
+	pf := builder.Writelnf
 	pErrCheck := func() {
 		pf("if err != nil {")
 		pf("api.ServeError(h.log, w, http.StatusBadRequest, err)")
@@ -374,12 +477,19 @@ func handleBody(pf func(format string, a ...interface{}), body interface{}) {
 	pf("")
 }
 
-// getElementaryType simplifies a Go type.
-func getElementaryType(t reflect.Type) reflect.Type {
-	switch t.Kind() {
-	case reflect.Array, reflect.Chan, reflect.Map, reflect.Ptr, reflect.Slice:
-		return getElementaryType(t.Elem())
-	default:
-		return t
+type importPath string
+
+// PkgName returns the name of the package based of the last part of the import
+// path and false if the name isn't a rename, otherwise it returns true.
+//
+// The package name is renamed when the last part of the path contains hyphen
+// (-) or dot (.) and the rename is this part with the hyphens and dots
+// stripped.
+func (i importPath) PkgName() (rename string, ok bool) {
+	b := filepath.Base(string(i))
+	if strings.Contains(b, "-") || strings.Contains(b, ".") {
+		return strings.ReplaceAll(strings.ReplaceAll(b, "-", ""), ".", ""), true
 	}
+
+	return b, false
 }

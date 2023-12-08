@@ -14,16 +14,13 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
-	"storj.io/common/identity"
 	"storj.io/common/peertls/extensions"
-	"storj.io/common/storj"
 	"storj.io/private/debug"
 	"storj.io/private/version"
 	"storj.io/storj/private/lifecycle"
-	version_checker "storj.io/storj/private/version/checker"
 	"storj.io/storj/satellite/gc/bloomfilter"
 	"storj.io/storj/satellite/metabase"
-	"storj.io/storj/satellite/metabase/segmentloop"
+	"storj.io/storj/satellite/metabase/rangedloop"
 	"storj.io/storj/satellite/overlay"
 )
 
@@ -31,17 +28,11 @@ import (
 //
 // architecture: Peer
 type GarbageCollectionBF struct {
-	Log      *zap.Logger
-	Identity *identity.FullIdentity
-	DB       DB
+	Log *zap.Logger
+	DB  DB
 
 	Servers  *lifecycle.Group
 	Services *lifecycle.Group
-
-	Version struct {
-		Chore   *version_checker.Chore
-		Service *version_checker.Service
-	}
 
 	Debug struct {
 		Listener net.Listener
@@ -52,24 +43,21 @@ type GarbageCollectionBF struct {
 		DB overlay.DB
 	}
 
-	Metainfo struct {
-		SegmentLoop *segmentloop.Service
+	GarbageCollection struct {
+		Config bloomfilter.Config
 	}
 
-	GarbageCollection struct {
-		Config  bloomfilter.Config
-		Service *bloomfilter.Service
+	RangedLoop struct {
+		Service *rangedloop.Service
 	}
 }
 
 // NewGarbageCollectionBF creates a new satellite garbage collection peer which collects storage nodes bloom filters.
-func NewGarbageCollectionBF(log *zap.Logger, full *identity.FullIdentity, db DB,
-	metabaseDB *metabase.DB, revocationDB extensions.RevocationDB,
+func NewGarbageCollectionBF(log *zap.Logger, db DB, metabaseDB *metabase.DB, revocationDB extensions.RevocationDB,
 	versionInfo version.Info, config *Config, atomicLogLevel *zap.AtomicLevel) (*GarbageCollectionBF, error) {
 	peer := &GarbageCollectionBF{
-		Log:      log,
-		Identity: full,
-		DB:       db,
+		Log: log,
+		DB:  db,
 
 		Servers:  lifecycle.NewGroup(log.Named("servers")),
 		Services: lifecycle.NewGroup(log.Named("services")),
@@ -77,8 +65,8 @@ func NewGarbageCollectionBF(log *zap.Logger, full *identity.FullIdentity, db DB,
 
 	{ // setup debug
 		var err error
-		if config.Debug.Address != "" {
-			peer.Debug.Listener, err = net.Listen("tcp", config.Debug.Address)
+		if config.Debug.Addr != "" {
+			peer.Debug.Listener, err = net.Listen("tcp", config.Debug.Addr)
 			if err != nil {
 				withoutStack := errors.New(err.Error())
 				peer.Log.Debug("failed to start debug endpoints", zap.Error(withoutStack))
@@ -94,60 +82,41 @@ func NewGarbageCollectionBF(log *zap.Logger, full *identity.FullIdentity, db DB,
 		})
 	}
 
-	{ // setup version control
-		peer.Log.Info("Version info",
-			zap.Stringer("Version", versionInfo.Version.Version),
-			zap.String("Commit Hash", versionInfo.CommitHash),
-			zap.Stringer("Build Timestamp", versionInfo.Timestamp),
-			zap.Bool("Release Build", versionInfo.Release),
-		)
-		peer.Version.Service = version_checker.NewService(log.Named("version"), config.Version, versionInfo, "Satellite")
-		peer.Version.Chore = version_checker.NewChore(peer.Version.Service, config.Version.CheckInterval)
-
-		peer.Services.Add(lifecycle.Item{
-			Name: "version",
-			Run:  peer.Version.Chore.Run,
-		})
-	}
-
 	{ // setup overlay
 		peer.Overlay.DB = peer.DB.OverlayCache()
-	}
-
-	{ // setup metainfo
-		peer.Metainfo.SegmentLoop = segmentloop.New(
-			log.Named("segmentloop"),
-			config.Metainfo.SegmentLoop,
-			metabaseDB,
-		)
-		peer.Services.Add(lifecycle.Item{
-			Name:  "metainfo:segmentloop",
-			Run:   peer.Metainfo.SegmentLoop.Run,
-			Close: peer.Metainfo.SegmentLoop.Close,
-		})
 	}
 
 	{ // setup garbage collection bloom filters
 		log := peer.Log.Named("garbage-collection-bf")
 		peer.GarbageCollection.Config = config.GarbageCollectionBF
-		if config.GarbageCollectionBF.UseRangedLoop {
-			log.Info("using ranged loop")
-		} else {
-			peer.GarbageCollection.Service = bloomfilter.NewService(
-				log,
-				config.GarbageCollectionBF,
-				peer.Overlay.DB,
-				peer.Metainfo.SegmentLoop,
-			)
 
-			if !config.GarbageCollectionBF.RunOnce {
-				peer.Services.Add(lifecycle.Item{
-					Name: "garbage-collection-bf",
-					Run:  peer.GarbageCollection.Service.Run,
-				})
-				peer.Debug.Server.Panel.Add(
-					debug.Cycle("Garbage Collection Bloom Filters", peer.GarbageCollection.Service.Loop))
-			}
+		var observer rangedloop.Observer
+		if peer.GarbageCollection.Config.UseSyncObserver {
+			observer = bloomfilter.NewSyncObserver(log.Named("gc-bf"),
+				peer.GarbageCollection.Config,
+				peer.Overlay.DB,
+			)
+		} else {
+			observer = bloomfilter.NewObserver(log.Named("gc-bf"),
+				peer.GarbageCollection.Config,
+				peer.Overlay.DB,
+			)
+		}
+
+		provider := rangedloop.NewMetabaseRangeSplitter(metabaseDB, config.RangedLoop.AsOfSystemInterval, config.RangedLoop.BatchSize)
+		peer.RangedLoop.Service = rangedloop.NewService(log.Named("rangedloop"), config.RangedLoop, provider, []rangedloop.Observer{
+			rangedloop.NewLiveCountObserver(metabaseDB, config.RangedLoop.SuspiciousProcessedRatio, config.RangedLoop.AsOfSystemInterval),
+			observer,
+		})
+
+		if !peer.GarbageCollection.Config.RunOnce {
+			peer.Services.Add(lifecycle.Item{
+				Name:  "garbage-collection-bf",
+				Run:   peer.RangedLoop.Service.Run,
+				Close: peer.RangedLoop.Service.Close,
+			})
+			peer.Debug.Server.Panel.Add(
+				debug.Cycle("Garbage Collection Bloom Filters", peer.RangedLoop.Service.Loop))
 		}
 	}
 
@@ -158,6 +127,9 @@ func NewGarbageCollectionBF(log *zap.Logger, full *identity.FullIdentity, db DB,
 func (peer *GarbageCollectionBF) Run(ctx context.Context) (err error) {
 	defer mon.Task()(&ctx)(&err)
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	group, ctx := errgroup.WithContext(ctx)
 
 	pprof.Do(ctx, pprof.Labels("subsystem", "gc-bloomfilter"), func(ctx context.Context) {
@@ -165,12 +137,16 @@ func (peer *GarbageCollectionBF) Run(ctx context.Context) (err error) {
 		peer.Services.Run(ctx, group)
 
 		if peer.GarbageCollection.Config.RunOnce {
-			err = peer.GarbageCollection.Service.RunOnce(ctx)
-		} else {
-			pprof.Do(ctx, pprof.Labels("name", "subsystem-wait"), func(ctx context.Context) {
-				err = group.Wait()
+			group.Go(func() error {
+				_, err = peer.RangedLoop.Service.RunOnce(ctx)
+				cancel()
+				return err
 			})
 		}
+
+		pprof.Do(ctx, pprof.Labels("name", "subsystem-wait"), func(ctx context.Context) {
+			err = group.Wait()
+		})
 	})
 
 	return err
@@ -183,6 +159,3 @@ func (peer *GarbageCollectionBF) Close() error {
 		peer.Services.Close(),
 	)
 }
-
-// ID returns the peer ID.
-func (peer *GarbageCollectionBF) ID() storj.NodeID { return peer.Identity.ID }

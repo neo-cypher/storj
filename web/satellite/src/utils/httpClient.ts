@@ -71,9 +71,10 @@ export class HttpClient {
     /**
      * Performs DELETE http request.
      * @param path
+     * @param body serialized JSON
      */
-    public async delete(path: string): Promise<Response> {
-        return this.sendJSON('DELETE', path, null);
+    public async delete(path: string, body: string | null = null): Promise<Response> {
+        return this.sendJSON('DELETE', path, body);
     }
 
     /**
@@ -81,25 +82,32 @@ export class HttpClient {
      * Call logout and redirect to login.
      */
     private async handleUnauthorized(): Promise<void> {
-        try {
-            const logoutPath = '/api/v0/auth/logout';
-            const request: RequestInit = {
-                method: 'POST',
-                body: null,
-            };
+        const path = window.location.href;
+        if (!path.includes('/login') && !path.includes('/signup')) {
+            try {
+                const logoutPath = '/api/v0/auth/logout';
+                const request: RequestInit = {
+                    method: 'POST',
+                    body: null,
+                };
 
-            request.headers = {
-                'Content-Type': 'application/json',
-            };
+                request.headers = {
+                    'Content-Type': 'application/json',
+                };
 
-            await fetch(logoutPath, request);
-            // eslint-disable-next-line no-empty
-        } catch (error) {}
-
-        setTimeout(() => {
-            if (!window.location.href.includes('/login')) {
-                window.location.href = window.location.origin + '/login';
+                await fetch(logoutPath, request);
+                // eslint-disable-next-line no-empty
+            } catch (error) {
             }
-        }, 2000);
+
+            setTimeout(() => {
+                const origin = window.location.origin;
+                if (document.querySelector('.v-overlay-container')) {
+                    window.location.href = origin + '/' + import.meta.env.VITE_VUETIFY_PREFIX + '/login';
+                    return;
+                }
+                window.location.href = origin + '/login';
+            }, 2000);
+        }
     }
 }

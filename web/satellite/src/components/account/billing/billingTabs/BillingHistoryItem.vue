@@ -14,61 +14,58 @@
                     <span>{{ item.formattedStatus }}</span>
                 </p>
                 <p class="array-val">
-                    {{ item.amount | centsToDollars }}
+                    {{ centsToDollars(item.amount) }}
                 </p>
             </div>
         </th>
-        <v-fragment>
-            <th class="align-left data tablet-laptop">
-                <p class="date">
-                    <span><Calendar /></span>
-                    <span>{{ item.formattedStart }}</span>
-                </p>
-            </th>
-            <th class="align-left data tablet-laptop">
-                <p class="status">
-                    <span v-if="item.status === 'paid'"> <CheckIcon class="checkmark" /> </span>
-                    <span>{{ item.formattedStatus }}</span>
-                </p>
-            </th>
-            <th class="align-left data tablet-laptop">
-                <p>
-                    {{ item.amount | centsToDollars }}
-                </p>
-            </th>
-            <th class="align-left data tablet-laptop">
-                <a :href="item.link" download>Invoice PDF</a>
-            </th>
-        </v-fragment>
+        <th class="align-left data tablet-laptop">
+            <p class="date">
+                <span><Calendar /></span>
+                <span>{{ item.formattedStart }}</span>
+            </p>
+        </th>
+        <th class="align-left data tablet-laptop">
+            <p class="status">
+                <span v-if="item.status === 'paid'"> <CheckIcon class="checkmark" /> </span>
+                <span>{{ item.formattedStatus }}</span>
+            </p>
+        </th>
+        <th class="align-left data tablet-laptop">
+            <p>
+                {{ centsToDollars(item.amount) }}
+            </p>
+        </th>
+        <th class="align-left data tablet-laptop">
+            <a :href="item.link" target="_blank" rel="noreferrer noopener" download>Invoice PDF</a>
+        </th>
     </tr>
 </template>
 
 <script setup lang="ts">
-import { Fragment as VFragment } from 'vue-fragment';
-
-import { PaymentsHistoryItem } from '@/types/payments';
-import { AnalyticsHttpApi } from '@/api/analytics';
+import { centsToDollars } from '@/utils/strings';
+import { PaymentsHistoryItem, PaymentsHistoryItemStatus } from '@/types/payments';
 import { AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
 import { useResize } from '@/composables/resize';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 import CheckIcon from '@/../static/images/billing/check-green-circle.svg';
 import Calendar from '@/../static/images/billing/calendar.svg';
 
-const analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
-
 const props = withDefaults(defineProps<{
     item: PaymentsHistoryItem;
 }>(), {
-    item: () => new PaymentsHistoryItem('', '', 0, 0, '', '', new Date(), new Date(), 0, 0),
+    item: () => new PaymentsHistoryItem('', '', 0, 0, PaymentsHistoryItemStatus.Pending, '', new Date(), new Date(), 0, 0),
 });
 
+const analyticsStore = useAnalyticsStore();
 const { isMobile, isTablet } = useResize();
 
 function downloadInvoice() {
-    analytics.eventTriggered(AnalyticsEvent.INVOICE_DOWNLOADED);
+    analyticsStore.eventTriggered(AnalyticsEvent.INVOICE_DOWNLOADED);
 
-    if (isMobile || isTablet)
+    if (isMobile.value || isTablet.value) {
         window.open(props.item.link, '_blank', 'noreferrer');
+    }
 }
 </script>
 
@@ -108,7 +105,7 @@ function downloadInvoice() {
         }
     }
 
-    @media only screen and (max-width: 425px) {
+    @media only screen and (width <= 425px) {
 
         .mobile {
             display: table-cell;
@@ -119,7 +116,7 @@ function downloadInvoice() {
         }
     }
 
-    @media only screen and (min-width: 426px) {
+    @media only screen and (width >= 426px) {
 
         .tablet-laptop {
             display: table-cell;

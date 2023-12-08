@@ -8,17 +8,21 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jtolio/eventkit"
 	"github.com/spacemonkeygo/monkit/v3"
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 
 	"storj.io/common/errs2"
 	"storj.io/common/sync2"
-	"storj.io/storj/satellite/metabase/segmentloop"
 )
 
 var (
 	mon = monkit.Package()
+	ev  = eventkit.Package()
+
+	// Error is a standard error class for this component.
+	Error = errs.Class("ranged loop")
 )
 
 // Config contains configurable values for the shared loop.
@@ -26,7 +30,9 @@ type Config struct {
 	Parallelism        int           `help:"how many chunks of segments to process in parallel" default:"2"`
 	BatchSize          int           `help:"how many items to query in a batch" default:"2500"`
 	AsOfSystemInterval time.Duration `help:"as of system interval" releaseDefault:"-5m" devDefault:"-1us" testDefault:"-1us"`
-	Interval           time.Duration `help:"how often to run the loop" releaseDefault:"2h" devDefault:"10s" testDefault:"10s"`
+	Interval           time.Duration `help:"how often to run the loop" releaseDefault:"2h" devDefault:"10s" testDefault:"0"`
+
+	SuspiciousProcessedRatio float64 `help:"ratio where to consider processed count as supicious" default:"0.03"`
 }
 
 // Service iterates through all segments and calls the attached observers for every segment
@@ -77,14 +83,27 @@ type ObserverDuration struct {
 	Duration time.Duration
 }
 
+// Close stops the ranged loop.
+func (service *Service) Close() error {
+	service.Loop.Close()
+	return nil
+}
+
 // Run starts the looping service.
 func (service *Service) Run(ctx context.Context) (err error) {
 	defer mon.Task()(&ctx)(&err)
 
+	if service.config.Interval == 0 {
+		return nil
+	}
+
 	service.log.Info("ranged loop initialized")
 
 	return service.Loop.Run(ctx, func(ctx context.Context) error {
-		service.log.Info("ranged loop started")
+		service.log.Info("ranged loop started",
+			zap.Int("parallelism", service.config.Parallelism),
+			zap.Int("batchSize", service.config.BatchSize),
+		)
 		_, err := service.RunOnce(ctx)
 		if err != nil {
 			service.log.Error("ranged loop failure", zap.Error(err))
@@ -120,10 +139,14 @@ func (service *Service) RunOnce(ctx context.Context) (observerDurations []Observ
 	}
 
 	group := errs2.Group{}
-	for _, rangeProvider := range rangeProviders {
+	for index, rangeProvider := range rangeProviders {
+		uuidRange := rangeProvider.Range()
+		service.log.Debug("creating range", zap.Int("index", index), zap.Stringer("start", uuidRange.Start), zap.Stringer("end", uuidRange.End))
+
 		rangeObservers := []*rangeObserverState{}
 		for i, observerState := range observerStates {
 			if observerState.err != nil {
+				service.log.Debug("observer returned error", zap.Error(observerState.err))
 				continue
 			}
 			rangeObserver, err := observerState.observer.Fork(ctx)
@@ -145,14 +168,14 @@ func (service *Service) RunOnce(ctx context.Context) (observerDurations []Observ
 		return nil, errs.Combine(errList...)
 	}
 
-	return finishObservers(ctx, service.log, observerStates)
+	return finishObservers(ctx, service.log, observerStates), nil
 }
 
 func createGoroutineClosure(ctx context.Context, rangeProvider SegmentProvider, states []*rangeObserverState) func() error {
 	return func() (err error) {
 		defer mon.Task()(&ctx)(&err)
 
-		return rangeProvider.Iterate(ctx, func(segments []segmentloop.Segment) error {
+		return rangeProvider.Iterate(ctx, func(segments []Segment) error {
 			// check for cancellation every segment batch
 			select {
 			case <-ctx.Done():
@@ -191,14 +214,14 @@ func startObserver(ctx context.Context, log *zap.Logger, startTime time.Time, ob
 	}
 }
 
-func finishObservers(ctx context.Context, log *zap.Logger, observerStates []observerState) (observerDurations []ObserverDuration, err error) {
+func finishObservers(ctx context.Context, log *zap.Logger, observerStates []observerState) (observerDurations []ObserverDuration) {
 	for _, state := range observerStates {
 		observerDurations = append(observerDurations, finishObserver(ctx, log, state))
 	}
 
 	sendObserverDurations(observerDurations)
 
-	return observerDurations, nil
+	return observerDurations
 }
 
 // Iterating over the segments is done.
@@ -260,7 +283,7 @@ func finishObserver(ctx context.Context, log *zap.Logger, state observerState) O
 	}
 }
 
-func processBatch(ctx context.Context, states []*rangeObserverState, segments []segmentloop.Segment) (err error) {
+func processBatch(ctx context.Context, states []*rangeObserverState, segments []Segment) (err error) {
 	for _, state := range states {
 		if state.err != nil {
 			// this observer has errored in a previous batch

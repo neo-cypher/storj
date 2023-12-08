@@ -5,139 +5,167 @@
     <table-item
         :item="itemToRender"
         :on-click="onClick"
+        :on-primary-click="onClick"
         :show-guide="shouldShowGuide"
         :hide-guide="hideGuidePermanently"
-        table-type="bucket"
+        item-type="bucket"
     >
-        <th slot="options" v-click-outside="closeDropdown" :class="{active: isDropdownOpen}" class="bucket-item__functional options overflow-visible" @click.stop="openDropdown(dropdownKey)">
-            <dots-icon />
-            <div v-if="isDropdownOpen" class="bucket-item__functional__dropdown">
-                <div class="bucket-item__functional__dropdown__item" @click.stop="onDetailsClick">
-                    <details-icon />
-                    <p class="bucket-item__functional__dropdown__item__label">View Bucket Details</p>
+        <template #options>
+            <th v-click-outside="closeDropdown" :class="{active: isDropdownOpen}" class="bucket-item__functional options overflow-visible" @click.stop="openDropdown(dropdownKey)">
+                <dots-icon />
+                <div v-if="isDropdownOpen" class="bucket-item__functional__dropdown">
+                    <div class="bucket-item__functional__dropdown__item" @click.stop="onDetailsClick">
+                        <details-icon />
+                        <p class="bucket-item__functional__dropdown__item__label">View Bucket Details</p>
+                    </div>
+                    <div class="bucket-item__functional__dropdown__item" @click.stop="onShareClick">
+                        <share-icon />
+                        <p class="bucket-item__functional__dropdown__item__label">Share Bucket</p>
+                    </div>
+                    <div class="bucket-item__functional__dropdown__item delete" @click.stop="onDeleteClick">
+                        <delete-icon />
+                        <p class="bucket-item__functional__dropdown__item__label">Delete Bucket</p>
+                    </div>
                 </div>
-                <div class="bucket-item__functional__dropdown__item delete" @click.stop="onDeleteClick">
-                    <delete-icon />
-                    <p class="bucket-item__functional__dropdown__item__label">Delete Bucket</p>
-                </div>
-            </div>
-        </th>
+            </th>
+        </template>
     </table-item>
 </template>
 
-<script lang="ts">
-import { Component, Prop } from 'vue-property-decorator';
+<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 
-import { RouteConfig } from '@/router';
+import { RouteConfig } from '@/types/router';
 import { Bucket } from '@/types/buckets';
 import { LocalData } from '@/utils/localData';
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
+import { MODALS } from '@/utils/constants/appStatePopUps';
+import { useResize } from '@/composables/resize';
+import { useAppStore } from '@/store/modules/appStore';
+import { useBucketsStore } from '@/store/modules/bucketsStore';
+import { ShareType } from '@/types/browser';
 
 import TableItem from '@/components/common/TableItem.vue';
-import Resizable from '@/components/common/Resizable.vue';
 
 import DeleteIcon from '@/../static/images/objects/delete.svg';
 import DetailsIcon from '@/../static/images/objects/details.svg';
+import ShareIcon from '@/../static/images/objects/share.svg';
 import DotsIcon from '@/../static/images/objects/dots.svg';
 
-// @vue/component
-@Component({
-    components: {
-        TableItem,
-        DotsIcon,
-        DeleteIcon,
-        DetailsIcon,
-    },
-})
-export default class BucketItem extends Resizable {
-    @Prop({ default: null })
-    public readonly itemData: Bucket;
-    @Prop({ default: () => () => {} })
-    public readonly openDropdown;
-    @Prop({ default: () => (_: string) => {} })
-    public readonly onClick: (bucket: string) => void;
-    @Prop({ default: false })
-    public readonly isDropdownOpen: boolean;
-    @Prop({ default: true })
-    public readonly showGuide: boolean;
-    @Prop({ default: -1 })
-    public readonly dropdownKey: number;
+const appStore = useAppStore();
+const bucketsStore = useBucketsStore();
+const router = useRouter();
+const route = useRoute();
+const { screenWidth } = useResize();
 
-    public isGuideShown = true;
+const props = withDefaults(defineProps<{
+    itemData: Bucket;
+    openDropdown: (key: number) => void;
+    onClick: (bucket: string) => void;
+    isDropdownOpen: boolean;
+    showGuide: boolean;
+    dropdownKey: number;
+}>(), {
+    itemData: () => new Bucket(),
+    openDropdown: (_: number) => {},
+    onClick: (_: string) => {},
+    isDropdownOpen: false,
+    showGuide: true,
+    dropdownKey: -1,
+});
 
-    public mounted(): void {
-        this.isGuideShown = !LocalData.getBucketGuideHidden();
-    }
+const isGuideShown = ref<boolean>(true);
 
-    public get shouldShowGuide(): boolean {
-        return this.showGuide && this.isGuideShown;
-    }
+const shouldShowGuide = computed((): boolean => {
+    return props.showGuide && isGuideShown.value;
+});
 
-    /**
-     * Returns formatted date.
-     */
-    public get formattedDate(): string {
-        return this.itemData.since.toLocaleString('en-US', { day: '2-digit', month: 'numeric', year: 'numeric' }) || '';
-    }
+/**
+ * Returns formatted date.
+ */
+const formattedDate = computed((): string => {
+    return props.itemData.since.toLocaleString('en-US', { day: '2-digit', month: 'numeric', year: 'numeric' }) || '';
+});
 
-    public get itemToRender(): { [key: string]: string | string[] } {
-        if (this.screenWidth > 875) return {
-            name: this.itemData.name,
-            storage: `${this.itemData.storage.toFixed(2)}GB`,
-            bandwidth: `${this.itemData.egress.toFixed(2)}GB`,
-            objects: this.itemData.objectCount.toString(),
-            segments: this.itemData.segmentCount.toString(),
-            date: this.formattedDate,
-        };
+const itemToRender = computed((): { [key: string]: string | string[] } => {
+    if (screenWidth.value > 875) return {
+        name: props.itemData.name,
+        storage: `${props.itemData.storage.toFixed(2)}GB`,
+        bandwidth: `${props.itemData.egress.toFixed(2)}GB`,
+        objects: props.itemData.objectCount.toString(),
+        segments: props.itemData.segmentCount.toString(),
+        date: formattedDate.value,
+    };
 
-        return { info: [
-            this.itemData.name,
-            `Storage ${this.itemData.storage.toFixed(2)}GB`,
-            `Bandwidth ${this.itemData.egress.toFixed(2)}GB`,
-            `Objects ${this.itemData.objectCount.toString()}`,
-            `Segments ${this.itemData.segmentCount.toString()}`,
-            `Created ${this.formattedDate}`,
-        ] };
-    }
+    return { info: [
+        props.itemData.name,
+        `Storage ${props.itemData.storage.toFixed(2)}GB`,
+        `Egress ${props.itemData.egress.toFixed(2)}GB`,
+        `Objects ${props.itemData.objectCount.toString()}`,
+        `Segments ${props.itemData.segmentCount.toString()}`,
+        `Created ${formattedDate.value}`,
+    ] };
+});
 
-    /*
-    * Permanently hide the upload guide
-    * */
-    public hideGuidePermanently(): void {
-        this.isGuideShown = false;
-        LocalData.setBucketGuideHidden();
-    }
-
-    /**
-     * Closes dropdown.
-     */
-    public closeDropdown(): void {
-        this.openDropdown(-1);
-    }
-
-    /**
-     * Holds on delete click logic.
-     */
-    public onDeleteClick(): void {
-        this.$store.commit(APP_STATE_MUTATIONS.TOGGLE_DELETE_BUCKET_MODAL_SHOWN);
-        this.closeDropdown();
-    }
-
-    /**
-     * Redirects to bucket details page.
-     */
-    public onDetailsClick(): void {
-        this.$router.push({
-            name: RouteConfig.Buckets.with(RouteConfig.BucketsDetails).name,
-            params: {
-                bucketName: this.itemData.name,
-                backRoute: this.$route.name || '',
-            },
-        });
-
-        this.closeDropdown();
-    }
+/**
+ * Permanently hide the upload guide
+ */
+function hideGuidePermanently(): void {
+    isGuideShown.value = false;
+    LocalData.setBucketGuideHidden();
 }
+
+/**
+ * Closes dropdown.
+ */
+function closeDropdown(): void {
+    props.openDropdown(-1);
+}
+
+/**
+ * Holds on delete click logic.
+ */
+function onDeleteClick(): void {
+    bucketsStore.setBucketToDelete(props.itemData.name);
+    appStore.updateActiveModal(MODALS.deleteBucket);
+    closeDropdown();
+}
+
+/**
+ * Redirects to bucket details page.
+ */
+function onDetailsClick(): void {
+    router.push({
+        name: RouteConfig.Buckets.with(RouteConfig.BucketsDetails).name,
+        query: {
+            bucketName: props.itemData.name,
+            backRoute: route.name as string || '',
+        },
+    });
+
+    closeDropdown();
+}
+
+/**
+ * Opens the Share modal for this bucket.
+ */
+function onShareClick(): void {
+    bucketsStore.setFileComponentBucketName(props.itemData.name);
+    appStore.setShareModalType(ShareType.Bucket);
+
+    if (bucketsStore.state.promptForPassphrase) {
+        appStore.updateActiveModal(MODALS.enterBucketPassphrase);
+        bucketsStore.setEnterPassphraseCallback((): void => {
+            appStore.updateActiveModal(MODALS.share);
+        });
+        return;
+    }
+    appStore.updateActiveModal(MODALS.share);
+}
+
+onMounted((): void => {
+    isGuideShown.value = !LocalData.getBucketGuideHidden();
+});
 </script>
 
 <style scoped lang="scss">
@@ -192,7 +220,7 @@ export default class BucketItem extends Resizable {
                 width: 25rem;
                 display: flex;
                 flex-direction: column;
-                align-items: start;
+                align-items: flex-start;
                 transform: translateX(-100%);
                 background-color: var(--c-blue-3);
                 text-align: center;
@@ -201,11 +229,11 @@ export default class BucketItem extends Resizable {
                 padding: 20px;
                 z-index: 1001;
 
-                @media screen and (max-width: 320px) {
+                @media screen and (width <= 320px) {
                     transform: translateX(-80%);
                 }
 
-                @media screen and (max-width: 375px) and (min-width: 350px) {
+                @media screen and (width <= 375px) and (width >= 350px) {
                     transform: translateX(-88%);
                 }
 
@@ -219,7 +247,7 @@ export default class BucketItem extends Resizable {
                     border-color: var(--c-blue-3) transparent transparent;
                     transform: rotate(180deg);
 
-                    @media screen and (max-width: 550px) {
+                    @media screen and (width <= 550px) {
                         left: 45%;
                     }
                 }
@@ -245,7 +273,7 @@ export default class BucketItem extends Resizable {
 
                 &__actions {
                     display: flex;
-                    justify-content: end;
+                    justify-content: flex-end;
                     align-items: center;
                     width: 100%;
 
@@ -273,28 +301,28 @@ export default class BucketItem extends Resizable {
         text-overflow: ellipsis;
     }
 
-    @media screen and (max-width: 1400px) {
+    @media screen and (width <= 1400px) {
 
         :deep(th) {
             max-width: 25rem;
         }
     }
 
-    @media screen and (max-width: 1100px) {
+    @media screen and (width <= 1100px) {
 
         :deep(th) {
             max-width: 20rem;
         }
     }
 
-    @media screen and (max-width: 1000px) {
+    @media screen and (width <= 1000px) {
 
         :deep(th) {
             max-width: 15rem;
         }
     }
 
-    @media screen and (max-width: 940px) {
+    @media screen and (width <= 940px) {
 
         :deep(th) {
             max-width: 10rem;

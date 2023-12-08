@@ -114,19 +114,21 @@ func (o *stdReadHandle) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 
-	if o.len < int64(len(p)) {
+	if o.len >= 0 && o.len < int64(len(p)) {
 		p = p[:o.len]
 	}
 
 	n, err := o.stdin.Read(p)
-	o.len -= int64(n)
+	if o.len > 0 {
+		o.len -= int64(n)
+	}
 
 	if err != nil && o.err == nil {
 		o.err = err
 		o.done.Release()
 	}
 
-	if o.len <= 0 {
+	if o.len == 0 {
 		o.closed = true
 		o.done.Release()
 	}

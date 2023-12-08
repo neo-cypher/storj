@@ -7,28 +7,23 @@
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Vue } from 'vue-property-decorator';
-
-// @vue/component
-@Component
-export default class OnboardingTourArea extends Vue {}
-</script>
+<script setup lang="ts"></script>
 
 <style scoped lang="scss">
 .tour-area {
     padding: 30px 0;
+    box-sizing: border-box;
     width: 100%;
-    height: calc(100% - 60px);
     display: flex;
     flex-direction: column;
     align-items: center;
-}
 
-@media screen and (max-width: 760px) {
-
-    .tour-area {
+    @media screen and (width <= 760px) {
         width: 88% !important;
+    }
+
+    @media screen and (width <= 600px) {
+        padding: 30px 0 !important;
     }
 }
 </style>

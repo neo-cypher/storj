@@ -1,6 +1,8 @@
 // Copyright (C) 2019 Storj Labs, Inc.
 // See LICENSE for copying information.
 
+import { DEFAULT_PAGE_LIMIT } from '@/types/pagination';
+
 /**
  * Exposes all project-related functionality.
  */
@@ -29,41 +31,50 @@ export interface ProjectsApi {
      * @throws Error
      */
     update(projectId: string, updateProjectFields: ProjectFields, updateProjectLimits: ProjectLimits): Promise<void>;
+
     /**
-     * Delete project.
+     * Get project limits.
      *
      * @param projectId - project ID
      * @throws Error
      */
-    delete(projectId: string): Promise<void>;
-
-    /**
-     * Get project limits.
-     *
-     * @param projectId- project ID
-     * throws Error
-     */
     getLimits(projectId: string): Promise<ProjectLimits>;
 
     /**
+     * Request limit increase.
+     *
+     * @param projectId - project ID
+     * @param info - request information
+     * @throws Error
+     */
+    requestLimitIncrease(projectId: string, info: LimitRequestInfo): Promise<void>;
+
+    /**
      * Get project salt
-     * 
+     *
      * @param projectID - project ID
-     * throws Error
+     * @throws Error
      */
     getSalt(projectID: string): Promise<string>;
-    
+
     /**
      * Get project limits.
      *
-     * throws Error
+     * @throws Error
      */
     getTotalLimits(): Promise<ProjectLimits>;
 
     /**
+     * Get link to download total usage report for all the projects that user owns.
+     *
+     * @throws Error
+     */
+    getTotalUsageReportLink(start: Date, end: Date, projectID: string): string
+
+    /**
      * Get project daily usage by specific date range.
      *
-     * throws Error
+     * @throws Error
      */
     getDailyUsage(projectID: string, start: Date, end: Date): Promise<ProjectsStorageBandwidthDaily>;
 
@@ -74,6 +85,20 @@ export interface ProjectsApi {
      * @throws Error
      */
     getOwnedProjects(cursor: ProjectsCursor): Promise<ProjectsPage>;
+
+    /**
+     * Returns a user's pending project member invitations.
+     *
+     * @throws Error
+     */
+    getUserInvitations(): Promise<ProjectInvitation[]>;
+
+    /**
+     * Handles accepting or declining a user's project member invitation.
+     *
+     * @throws Error
+     */
+    respondToInvitation(projectID: string, response: ProjectInvitationResponse): Promise<void>;
 }
 
 /**
@@ -90,6 +115,8 @@ export const MAX_DESCRIPTION_LENGTH = 100;
  * Project is a type, used for creating new project in backend.
  */
 export class Project {
+    public urlId: string;
+
     public constructor(
         public id: string = '',
         public name: string = '',
@@ -98,6 +125,7 @@ export class Project {
         public ownerId: string = '',
         public isSelected: boolean = false,
         public memberCount: number = 0,
+        public edgeURLOverrides?: EdgeURLOverrides,
     ) {}
 
     /**
@@ -108,6 +136,15 @@ export class Project {
         return createdAt.toLocaleString('en-US', { year: 'numeric', month: '2-digit', day: 'numeric' });
     }
 }
+
+/**
+ * EdgeURLOverrides contains overrides for edge service URLs.
+ */
+export type EdgeURLOverrides = {
+    authService?: string;
+    publicLinksharing?: string;
+    internalLinksharing?: string;
+};
 
 /**
  * ProjectFields is a type, used for creating and updating project.
@@ -153,6 +190,10 @@ export class ProjectLimits {
         public storageUsed: number = 0,
         public objectCount: number = 0,
         public segmentCount: number = 0,
+        public segmentLimit: number = 0,
+        public segmentUsed: number = 0,
+        public bucketsLimit: number = 0,
+        public bucketsUsed: number = 0,
     ) {}
 }
 
@@ -184,8 +225,8 @@ export class ProjectsPage {
  */
 export class ProjectsCursor {
     public constructor(
-        public limit: number = 0,
-        public page: number = 0,
+        public limit: number = DEFAULT_PAGE_LIMIT,
+        public page: number = 1,
     ) {}
 }
 
@@ -215,8 +256,45 @@ export class ProjectsStorageBandwidthDaily {
     public constructor(
         public storage: DataStamp[] = [],
         public allocatedBandwidth: DataStamp[] = [],
-        public settledBandwidth: DataStamp[] = [],
     ) {}
+}
+
+/**
+ * ProjectInvitation represents a pending project member invitation.
+ */
+export class ProjectInvitation {
+    public constructor(
+        public projectID: string,
+        public projectName: string,
+        public projectDescription: string,
+        public inviterEmail: string,
+        public createdAt: Date,
+    ) {}
+
+    /**
+     * Returns created date as a local string.
+     */
+    public get invitedDate(): string {
+        const createdAt = new Date(this.createdAt);
+        return createdAt.toLocaleString('en-US', { year: 'numeric', month: '2-digit', day: 'numeric' });
+    }
+}
+
+/**
+ * ProjectInvitationResponse represents a response to a project member invitation.
+ */
+export enum ProjectInvitationResponse {
+    Decline,
+    Accept,
+}
+
+/**
+ * LimitRequestInfo holds data needed to request limit increase.
+ */
+export interface LimitRequestInfo {
+    limitType: string
+    currentLimit: string
+    desiredLimit: string
 }
 
 /**
@@ -226,3 +304,28 @@ export interface ProjectUsageDateRange {
     since: Date;
     before: Date;
 }
+
+export enum LimitToChange {
+    Storage = 'Storage',
+    Bandwidth = 'Download',
+}
+
+export enum FieldToChange {
+    Name = 'Name',
+    Description = 'Description',
+}
+
+export enum LimitThreshold {
+    Hundred = 'Hundred',
+    Eighty = 'Eighty',
+    CustomHundred = 'CustomHundred',
+    CustomEighty = 'CustomEighty',
+}
+
+export enum LimitType {
+    Storage = 'Storage',
+    Egress = 'Egress',
+    Segment = 'Segment',
+}
+
+export type LimitThresholdsReached = Record<LimitThreshold, LimitType[]>;

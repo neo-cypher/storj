@@ -16,6 +16,7 @@ import (
 	"storj.io/common/testrand"
 	"storj.io/storj/private/blockchain"
 	"storj.io/storj/satellite"
+	"storj.io/storj/satellite/payments"
 	"storj.io/storj/satellite/payments/billing"
 	"storj.io/storj/satellite/satellitedb/satellitedbtest"
 )
@@ -28,6 +29,8 @@ func TestTransactionsDBList(t *testing.T) {
 
 	// create transactions
 	userID := testrand.UUID()
+
+	firstTimestamp := makeTimestamp()
 
 	var txs []billing.Transaction
 	var txStatus billing.TransactionStatus
@@ -60,8 +63,7 @@ func TestTransactionsDBList(t *testing.T) {
 			Status:      txStatus,
 			Type:        txType,
 			Metadata:    metadata,
-			Timestamp:   time.Now(),
-			CreatedAt:   time.Now(),
+			Timestamp:   firstTimestamp.Add(time.Duration(i) * time.Second),
 		}
 
 		txs = append(txs, createTX)
@@ -73,16 +75,16 @@ func TestTransactionsDBList(t *testing.T) {
 				_, err := db.Billing().Insert(ctx, tx)
 				require.NoError(t, err)
 			}
-			storjscanTXs, err := db.Billing().List(ctx, userID)
+
+			actual, err := db.Billing().List(ctx, userID)
 			require.NoError(t, err)
-			require.Equal(t, 12, len(storjscanTXs))
-			for _, act := range storjscanTXs {
-				for _, exp := range txs {
-					if act.ID == exp.ID {
-						compareTransactions(t, exp, act)
-						break
-					}
-				}
+			require.Equal(t, len(txs), len(actual))
+
+			// The listing is in descending insertion order so compare
+			// accordingly (first listed compared with last inserted, etc.)
+			for i, act := range actual {
+				exp := txs[len(txs)-i-1]
+				compareTransactions(t, exp, act)
 			}
 		})
 	})
@@ -101,9 +103,12 @@ func TestTransactionsDBBalance(t *testing.T) {
 	address, err := blockchain.BytesToAddress(testrand.Bytes(20))
 	require.NoError(t, err)
 
-	metadata, err := json.Marshal(map[string]interface{}{
+	creditMetadata, err := json.Marshal(map[string]interface{}{
+		"Wallet": address.Hex(),
+	})
+	require.NoError(t, err)
+	debitMetadata, err := json.Marshal(map[string]interface{}{
 		"ReferenceID": "some stripe invoice ID",
-		"Wallet":      address.Hex(),
 	})
 	require.NoError(t, err)
 
@@ -114,9 +119,8 @@ func TestTransactionsDBBalance(t *testing.T) {
 		Source:      "storjscan",
 		Status:      billing.TransactionStatusCompleted,
 		Type:        billing.TransactionTypeCredit,
-		Metadata:    metadata,
-		Timestamp:   time.Now().Add(time.Second),
-		CreatedAt:   time.Now(),
+		Metadata:    creditMetadata,
+		Timestamp:   makeTimestamp().Add(time.Second),
 	}
 
 	credit30TX := billing.Transaction{
@@ -126,9 +130,8 @@ func TestTransactionsDBBalance(t *testing.T) {
 		Source:      "storjscan",
 		Status:      billing.TransactionStatusCompleted,
 		Type:        billing.TransactionTypeCredit,
-		Metadata:    metadata,
-		Timestamp:   time.Now().Add(time.Second * 2),
-		CreatedAt:   time.Now(),
+		Metadata:    creditMetadata,
+		Timestamp:   makeTimestamp().Add(time.Second * 2),
 	}
 
 	charge20TX := billing.Transaction{
@@ -138,9 +141,8 @@ func TestTransactionsDBBalance(t *testing.T) {
 		Source:      "storjscan",
 		Status:      billing.TransactionStatusCompleted,
 		Type:        billing.TransactionTypeDebit,
-		Metadata:    metadata,
-		Timestamp:   time.Now().Add(time.Second * 3),
-		CreatedAt:   time.Now(),
+		Metadata:    debitMetadata,
+		Timestamp:   makeTimestamp().Add(time.Second * 3),
 	}
 
 	t.Run("add 10 USD to account", func(t *testing.T) {
@@ -197,13 +199,17 @@ func TestTransactionsDBBalance(t *testing.T) {
 
 func TestUpdateTransactions(t *testing.T) {
 	tenUSD := currency.AmountFromBaseUnits(1000, currency.USDollars)
+	minusTenUSD := currency.AmountFromBaseUnits(-1000, currency.USDollars)
 	userID := testrand.UUID()
 	address, err := blockchain.BytesToAddress(testrand.Bytes(20))
 	require.NoError(t, err)
 
-	metadata, err := json.Marshal(map[string]interface{}{
+	creditMetadata, err := json.Marshal(map[string]interface{}{
+		"Wallet": address.Hex(),
+	})
+	require.NoError(t, err)
+	debitMetadata, err := json.Marshal(map[string]interface{}{
 		"ReferenceID": "some stripe invoice ID",
-		"Wallet":      address.Hex(),
 	})
 	require.NoError(t, err)
 
@@ -211,45 +217,54 @@ func TestUpdateTransactions(t *testing.T) {
 		UserID:      userID,
 		Amount:      tenUSD,
 		Description: "credit from storjscan payment",
-		Source:      "storjscan",
-		Status:      billing.TransactionStatusCompleted,
+		Source:      billing.StorjScanSource,
+		Status:      payments.PaymentStatusConfirmed,
 		Type:        billing.TransactionTypeCredit,
-		Metadata:    metadata,
-		Timestamp:   time.Now().Add(time.Second),
-		CreatedAt:   time.Now(),
+		Metadata:    creditMetadata,
+		Timestamp:   makeTimestamp().Add(time.Second),
+	}
+
+	debit10TX := billing.Transaction{
+		UserID:      userID,
+		Amount:      minusTenUSD,
+		Description: "Paid Stripe Invoice",
+		Source:      billing.StripeSource,
+		Status:      billing.TransactionStatusPending,
+		Type:        billing.TransactionTypeDebit,
+		Metadata:    debitMetadata,
+		Timestamp:   makeTimestamp().Add(time.Second),
 	}
 
 	t.Run("update metadata", func(t *testing.T) {
 		satellitedbtest.Run(t, func(ctx *testcontext.Context, t *testing.T, db satellite.DB) {
-			txID, err := db.Billing().Insert(ctx, credit10TX)
+			_, err := db.Billing().Insert(ctx, credit10TX)
 			require.NoError(t, err)
-			newAddress, err := blockchain.BytesToAddress(testrand.Bytes(20))
+			txIDs, err := db.Billing().Insert(ctx, debit10TX)
 			require.NoError(t, err)
 			metadata, err := json.Marshal(map[string]interface{}{
-				"Wallet": newAddress.Hex(),
+				"ReferenceID": "some other stripe invoice ID",
 			})
 			require.NoError(t, err)
-			err = db.Billing().UpdateMetadata(ctx, txID, metadata)
+			err = db.Billing().UpdateMetadata(ctx, txIDs[0], metadata)
 			require.NoError(t, err)
 			expMetadata, err := json.Marshal(map[string]interface{}{
-				"ReferenceID": "some stripe invoice ID",
-				"Wallet":      newAddress.Hex(),
+				"ReferenceID": "some other stripe invoice ID",
 			})
 			require.NoError(t, err)
-			credit10TX.Metadata = expMetadata
+			debit10TX.Metadata = expMetadata
 			tx, err := db.Billing().List(ctx, userID)
 			require.NoError(t, err)
-			compareTransactions(t, credit10TX, tx[0])
+			assert.Equal(t, 2, compareMultipleTransactions(t,
+				[]billing.Transaction{credit10TX, debit10TX},
+				tx))
 		})
 	})
 
-	t.Run("update status", func(t *testing.T) {
+	t.Run("confirm new token deposit", func(t *testing.T) {
 		satellitedbtest.Run(t, func(ctx *testcontext.Context, t *testing.T, db satellite.DB) {
-			txID, err := db.Billing().Insert(ctx, credit10TX)
+			_, err := db.Billing().Insert(ctx, credit10TX)
 			require.NoError(t, err)
-			err = db.Billing().UpdateStatus(ctx, txID, billing.TransactionStatusCancelled)
-			require.NoError(t, err)
-			credit10TX.Status = billing.TransactionStatusCancelled
+			credit10TX.Status = payments.PaymentStatusConfirmed
 			tx, err := db.Billing().List(ctx, userID)
 			require.NoError(t, err)
 			compareTransactions(t, credit10TX, tx[0])
@@ -257,8 +272,131 @@ func TestUpdateTransactions(t *testing.T) {
 	})
 }
 
-func TestUpdateMetadata(t *testing.T) {
+func TestCompletePendingPayment(t *testing.T) {
+	tenUSD := currency.AmountFromBaseUnits(1000, currency.USDollars)
+	minusTenUSD := currency.AmountFromBaseUnits(-1000, currency.USDollars)
+	userID := testrand.UUID()
+	address, err := blockchain.BytesToAddress(testrand.Bytes(20))
+	require.NoError(t, err)
 
+	creditMetadata, err := json.Marshal(map[string]interface{}{
+		"Wallet": address.Hex(),
+	})
+	require.NoError(t, err)
+	debitMetadata, err := json.Marshal(map[string]interface{}{
+		"ReferenceID": "some stripe invoice ID",
+	})
+	require.NoError(t, err)
+
+	credit10TX := billing.Transaction{
+		UserID:      userID,
+		Amount:      tenUSD,
+		Description: "credit from storjscan payment",
+		Source:      billing.StorjScanSource,
+		Status:      payments.PaymentStatusConfirmed,
+		Type:        billing.TransactionTypeCredit,
+		Metadata:    creditMetadata,
+		Timestamp:   makeTimestamp().Add(time.Second),
+	}
+
+	debit10TX := billing.Transaction{
+		UserID:      userID,
+		Amount:      minusTenUSD,
+		Description: "Paid Stripe Invoice",
+		Source:      billing.StripeSource,
+		Status:      billing.TransactionStatusPending,
+		Type:        billing.TransactionTypeDebit,
+		Metadata:    debitMetadata,
+		Timestamp:   makeTimestamp().Add(time.Second),
+	}
+	satellitedbtest.Run(t, func(ctx *testcontext.Context, t *testing.T, db satellite.DB) {
+		_, err := db.Billing().Insert(ctx, credit10TX)
+		require.NoError(t, err)
+		credit10TX.Status = payments.PaymentStatusConfirmed
+		tx, err := db.Billing().List(ctx, userID)
+		require.NoError(t, err)
+		compareTransactions(t, credit10TX, tx[0])
+
+		txIDs, err := db.Billing().Insert(ctx, debit10TX)
+		require.NoError(t, err)
+		err = db.Billing().CompletePendingInvoiceTokenPayments(ctx, txIDs[0])
+		require.NoError(t, err)
+		debit10TX.Status = billing.TransactionStatusCompleted
+		tx, err = db.Billing().List(ctx, userID)
+		require.NoError(t, err)
+		assert.Equal(t, 2, compareMultipleTransactions(t,
+			[]billing.Transaction{credit10TX, debit10TX}, tx))
+	})
+}
+
+func TestFailPendingPayment(t *testing.T) {
+	tenUSD := currency.AmountFromBaseUnits(1000, currency.USDollars)
+	minusTenUSD := currency.AmountFromBaseUnits(-1000, currency.USDollars)
+	userID := testrand.UUID()
+	address, err := blockchain.BytesToAddress(testrand.Bytes(20))
+	require.NoError(t, err)
+
+	creditMetadata, err := json.Marshal(map[string]interface{}{
+		"Wallet": address.Hex(),
+	})
+	require.NoError(t, err)
+	debitMetadata, err := json.Marshal(map[string]interface{}{
+		"ReferenceID": "some stripe invoice ID",
+	})
+	require.NoError(t, err)
+
+	credit10TX := billing.Transaction{
+		UserID:      userID,
+		Amount:      tenUSD,
+		Description: "credit from storjscan payment",
+		Source:      billing.StorjScanSource,
+		Status:      payments.PaymentStatusConfirmed,
+		Type:        billing.TransactionTypeCredit,
+		Metadata:    creditMetadata,
+		Timestamp:   makeTimestamp().Add(time.Second),
+	}
+
+	debit10TX := billing.Transaction{
+		UserID:      userID,
+		Amount:      minusTenUSD,
+		Description: "Paid Stripe Invoice",
+		Source:      billing.StripeSource,
+		Status:      billing.TransactionStatusPending,
+		Type:        billing.TransactionTypeDebit,
+		Metadata:    debitMetadata,
+		Timestamp:   makeTimestamp().Add(time.Second),
+	}
+	satellitedbtest.Run(t, func(ctx *testcontext.Context, t *testing.T, db satellite.DB) {
+		_, err := db.Billing().Insert(ctx, credit10TX)
+		require.NoError(t, err)
+		credit10TX.Status = payments.PaymentStatusConfirmed
+		tx, err := db.Billing().List(ctx, userID)
+		require.NoError(t, err)
+		compareTransactions(t, credit10TX, tx[0])
+
+		txIDs, err := db.Billing().Insert(ctx, debit10TX)
+		require.NoError(t, err)
+		err = db.Billing().FailPendingInvoiceTokenPayments(ctx, txIDs[0])
+		require.NoError(t, err)
+		debit10TX.Status = billing.TransactionStatusFailed
+		tx, err = db.Billing().List(ctx, userID)
+		require.NoError(t, err)
+		assert.Equal(t, 2, compareMultipleTransactions(t,
+			[]billing.Transaction{credit10TX, debit10TX}, tx))
+	})
+}
+
+func compareMultipleTransactions(t *testing.T, exp, act []billing.Transaction) int {
+	var matches = 0
+	for _, expectedTx := range exp {
+		for _, actualTX := range act {
+			if expectedTx.Description == actualTX.Description {
+				matches++
+				compareTransactions(t, expectedTx, actualTX)
+			}
+		}
+	}
+	return matches
 }
 
 // compareTransactions is a helper method to compare tx used to create db entry,
@@ -271,14 +409,19 @@ func compareTransactions(t *testing.T, exp, act billing.Transaction) {
 	assert.Equal(t, exp.Status, act.Status)
 	assert.Equal(t, exp.Source, act.Source)
 	assert.Equal(t, exp.Type, act.Type)
-	var expUpdatedMetadata map[string]string
-	var actUpdatedMetadata map[string]string
+	var expUpdatedMetadata map[string]interface{}
+	var actUpdatedMetadata map[string]interface{}
 	err := json.Unmarshal(exp.Metadata, &expUpdatedMetadata)
 	require.NoError(t, err)
 	err = json.Unmarshal(act.Metadata, &actUpdatedMetadata)
 	require.NoError(t, err)
 	assert.Equal(t, expUpdatedMetadata["ReferenceID"], actUpdatedMetadata["ReferenceID"])
 	assert.Equal(t, expUpdatedMetadata["Wallet"], actUpdatedMetadata["Wallet"])
-	assert.WithinDuration(t, exp.Timestamp, act.Timestamp, time.Microsecond) // database timestamps use microsecond precision
-	assert.False(t, act.CreatedAt.IsZero())
+	assert.NotEqual(t, time.Time{}, act.CreatedAt)
+}
+
+func makeTimestamp() time.Time {
+	// Truncate to microseconds to paper over a loss of nanosecond precision
+	// going in and out of the database due to timestamp column resolution.
+	return time.Now().Truncate(time.Microsecond)
 }

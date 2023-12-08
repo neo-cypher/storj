@@ -6,7 +6,12 @@ package audit_test
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -14,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"storj.io/common/errs2"
 	"storj.io/common/memory"
@@ -24,20 +30,20 @@ import (
 	"storj.io/common/testcontext"
 	"storj.io/common/testrand"
 	"storj.io/common/uuid"
-	"storj.io/storj/private/testblobs"
 	"storj.io/storj/private/testplanet"
 	"storj.io/storj/satellite"
 	"storj.io/storj/satellite/audit"
 	"storj.io/storj/satellite/metabase"
-	"storj.io/storj/storage"
 	"storj.io/storj/storagenode"
+	"storj.io/storj/storagenode/blobstore"
+	"storj.io/storj/storagenode/blobstore/testblobs"
 )
 
 // TestDownloadSharesHappyPath checks that the Share.Error field of all shares
 // returned by the DownloadShares method contain no error if all shares were
 // downloaded successfully.
 func TestDownloadSharesHappyPath(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -78,6 +84,7 @@ func TestDownloadSharesHappyPath(t *testing.T) {
 
 		for _, share := range shares {
 			assert.NoError(t, share.Error)
+			assert.Equal(t, audit.NoFailure, share.FailurePhase)
 		}
 	})
 }
@@ -92,7 +99,7 @@ func TestDownloadSharesHappyPath(t *testing.T) {
 // If this test fails, this most probably means we made a backward-incompatible
 // change that affects the audit service.
 func TestDownloadSharesOfflineNode(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -141,8 +148,10 @@ func TestDownloadSharesOfflineNode(t *testing.T) {
 				assert.True(t, rpc.Error.Has(share.Error), "unexpected error: %+v", share.Error)
 				assert.False(t, errs.Is(share.Error, context.DeadlineExceeded), "unexpected error: %+v", share.Error)
 				assert.True(t, errs2.IsRPC(share.Error, rpcstatus.Unknown), "unexpected error: %+v", share.Error)
+				assert.Equal(t, audit.DialFailure, share.FailurePhase)
 			} else {
 				assert.NoError(t, share.Error)
+				assert.Equal(t, audit.NoFailure, share.FailurePhase)
 			}
 		}
 	})
@@ -155,7 +164,7 @@ func TestDownloadSharesOfflineNode(t *testing.T) {
 // If this test fails, this most probably means we made a backward-incompatible
 // change that affects the audit service.
 func TestDownloadSharesMissingPiece(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -200,6 +209,7 @@ func TestDownloadSharesMissingPiece(t *testing.T) {
 
 		for _, share := range shares {
 			assert.True(t, errs2.IsRPC(share.Error, rpcstatus.NotFound), "unexpected error: %+v", share.Error)
+			assert.Equal(t, audit.RequestFailure, share.FailurePhase)
 		}
 	})
 }
@@ -214,7 +224,7 @@ func TestDownloadSharesMissingPiece(t *testing.T) {
 // If this test fails, this most probably means we made a backward-incompatible
 // change that affects the audit service.
 func TestDownloadSharesDialTimeout(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -282,7 +292,120 @@ func TestDownloadSharesDialTimeout(t *testing.T) {
 		for _, share := range shares {
 			assert.True(t, rpc.Error.Has(share.Error), "unexpected error: %+v", share.Error)
 			assert.True(t, errs.Is(share.Error, context.DeadlineExceeded), "unexpected error: %+v", share.Error)
+			assert.Equal(t, audit.DialFailure, share.FailurePhase)
 		}
+	})
+}
+
+// TestDownloadSharesDialIOTimeout checks that i/o timeout dial failures are
+// handled appropriately.
+//
+// This test differs from TestDownloadSharesDialTimeout in that it causes the
+// timeout error by replacing a storage node with a black hole TCP socket,
+// causing the failure directly instead of faking it with dialer.DialLatency.
+func TestDownloadSharesDialIOTimeout(t *testing.T) {
+	var group errgroup.Group
+	// we do this shutdown outside the testplanet scope, so that we can expect
+	// that planet has been shut down before waiting for the black hole goroutines
+	// to finish. (They won't finish until the remote end is closed, which happens
+	// during planet shutdown.)
+	defer func() { assert.NoError(t, group.Wait()) }()
+
+	testWithRangedLoop(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			// require all nodes for each operation
+			Satellite: testplanet.ReconfigureRS(4, 4, 4, 4),
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
+		satellite := planet.Satellites[0]
+		audits := satellite.Audit
+
+		audits.Worker.Loop.Pause()
+		pauseQueueing(satellite)
+
+		upl := planet.Uplinks[0]
+		testData := testrand.Bytes(8 * memory.KiB)
+
+		err := upl.Upload(ctx, satellite, "testbucket", "test/path", testData)
+		require.NoError(t, err)
+
+		err = runQueueingOnce(ctx, satellite)
+		require.NoError(t, err)
+
+		queue := audits.VerifyQueue
+		queueSegment, err := queue.Next(ctx)
+		require.NoError(t, err)
+
+		segment, err := satellite.Metabase.DB.GetSegmentByPosition(ctx, metabase.GetSegmentByPosition{
+			StreamID: queueSegment.StreamID,
+			Position: queueSegment.Position,
+		})
+		require.NoError(t, err)
+
+		blackHoleNode := planet.StorageNodes[testrand.Intn(len(planet.StorageNodes))]
+		require.NoError(t, planet.StopPeer(blackHoleNode))
+
+		// create a black hole in place of the storage node: a socket that only reads
+		// bytes and never says anything back. A connection to here using a bare TCP Dial
+		// would succeed, but a TLS Dial will not be able to handshake and will time out
+		// or wait forever.
+		listener, err := net.Listen("tcp", blackHoleNode.Addr())
+		require.NoError(t, err)
+		defer func() { assert.NoError(t, listener.Close()) }()
+		t.Logf("black hole listening on %s", listener.Addr())
+
+		group.Go(func() error {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					// this is terrible, but is apparently the standard and correct way to check
+					// for this specific error. See parseCloseError() in net/error_test.go in the
+					// Go stdlib.
+					assert.ErrorContains(t, err, "use of closed network connection")
+					return nil
+				}
+				t.Logf("connection made to black hole port %s", listener.Addr())
+				group.Go(func() (err error) {
+					defer func() { assert.NoError(t, conn.Close()) }()
+
+					// black hole: just read until the socket is closed on the other end
+					buf := make([]byte, 1024)
+					for {
+						_, err = conn.Read(buf)
+						if err != nil {
+							if !errors.Is(err, syscall.ECONNRESET) && !errors.Is(err, io.EOF) {
+								t.Fatalf("expected econnreset or eof, got %q", err.Error())
+							}
+							return nil
+						}
+					}
+				})
+			}
+		})
+
+		randomIndex, err := audit.GetRandomStripe(ctx, segment)
+		require.NoError(t, err)
+		shareSize := segment.Redundancy.ShareSize
+
+		limits, privateKey, cachedNodesInfo, err := satellite.Orders.Service.CreateAuditOrderLimits(ctx, segment, nil)
+		require.NoError(t, err)
+
+		verifier := satellite.Audit.Verifier
+		shares, err := verifier.DownloadShares(ctx, limits, privateKey, cachedNodesInfo, randomIndex, shareSize)
+		require.NoError(t, err)
+
+		observed := false
+		for _, share := range shares {
+			if share.NodeID.Compare(blackHoleNode.ID()) == 0 {
+				assert.ErrorIs(t, share.Error, context.DeadlineExceeded)
+				assert.Equal(t, audit.DialFailure, share.FailurePhase)
+				observed = true
+			} else {
+				assert.NoError(t, share.Error)
+			}
+		}
+		assert.Truef(t, observed, "No node in returned shares matched expected node ID")
 	})
 }
 
@@ -295,7 +418,7 @@ func TestDownloadSharesDialTimeout(t *testing.T) {
 // If this test fails, this most probably means we made a backward-incompatible
 // change that affects the audit service.
 func TestDownloadSharesDownloadTimeout(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 1, UplinkCount: 1,
 		Reconfigure: testplanet.Reconfigure{
 			StorageNodeDB: func(index int, db storagenode.DB, log *zap.Logger) (storagenode.DB, error) {
@@ -363,12 +486,13 @@ func TestDownloadSharesDownloadTimeout(t *testing.T) {
 		require.Len(t, shares, 1)
 		share := shares[0]
 		assert.True(t, errs2.IsRPC(share.Error, rpcstatus.DeadlineExceeded), "unexpected error: %+v", share.Error)
+		assert.Equal(t, audit.RequestFailure, share.FailurePhase)
 		assert.False(t, rpc.Error.Has(share.Error), "unexpected error: %+v", share.Error)
 	})
 }
 
 func TestVerifierHappyPath(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -407,7 +531,7 @@ func TestVerifierHappyPath(t *testing.T) {
 }
 
 func TestVerifierExpired(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -446,7 +570,7 @@ func TestVerifierExpired(t *testing.T) {
 }
 
 func TestVerifierOfflineNode(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 
@@ -491,7 +615,7 @@ func TestVerifierOfflineNode(t *testing.T) {
 }
 
 func TestVerifierMissingPiece(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -538,7 +662,7 @@ func TestVerifierMissingPiece(t *testing.T) {
 }
 
 func TestVerifierNotEnoughPieces(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 		Reconfigure: testplanet.Reconfigure{
 			StorageNodeDB: func(index int, db storagenode.DB, log *zap.Logger) (storagenode.DB, error) {
@@ -607,7 +731,7 @@ func TestVerifierNotEnoughPieces(t *testing.T) {
 }
 
 func TestVerifierDialTimeout(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -672,7 +796,7 @@ func TestVerifierDialTimeout(t *testing.T) {
 }
 
 func TestVerifierDeletedSegment(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -710,7 +834,7 @@ func TestVerifierDeletedSegment(t *testing.T) {
 }
 
 func TestVerifierModifiedSegment(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -763,7 +887,7 @@ func TestVerifierModifiedSegment(t *testing.T) {
 }
 
 func TestVerifierReplacedSegment(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -803,7 +927,7 @@ func TestVerifierReplacedSegment(t *testing.T) {
 }
 
 func TestVerifierModifiedSegmentFailsOnce(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -844,7 +968,15 @@ func TestVerifierModifiedSegmentFailsOnce(t *testing.T) {
 
 		assert.Len(t, report.Successes, origNumPieces-1)
 		require.Len(t, report.Fails, 1)
-		assert.Equal(t, report.Fails[0], piece.StorageNode)
+		assert.Equal(t, metabase.Piece{
+			StorageNode: piece.StorageNode,
+			Number:      piece.Number,
+		}, report.Fails[0])
+		require.NotNil(t, report.Segment)
+		assert.Equal(t, segment.StreamID, report.Segment.StreamID)
+		assert.Equal(t, segment.Position, report.Segment.Position)
+		assert.Equal(t, segment.Redundancy, report.Segment.Redundancy)
+		assert.Equal(t, segment.Pieces, report.Segment.Pieces)
 		assert.Len(t, report.Offlines, 0)
 		require.Len(t, report.PendingAudits, 0)
 	})
@@ -853,7 +985,7 @@ func TestVerifierModifiedSegmentFailsOnce(t *testing.T) {
 // TestVerifierSlowDownload checks that a node that times out while sending data to the
 // audit service gets put into containment mode.
 func TestVerifierSlowDownload(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 		Reconfigure: testplanet.Reconfigure{
 			StorageNodeDB: func(index int, db storagenode.DB, log *zap.Logger) (storagenode.DB, error) {
@@ -914,7 +1046,7 @@ func TestVerifierSlowDownload(t *testing.T) {
 // TestVerifierUnknownError checks that a node that returns an unknown error in response to an audit request
 // does not get marked as successful, failed, or contained.
 func TestVerifierUnknownError(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 		Reconfigure: testplanet.Reconfigure{
 			StorageNodeDB: func(index int, db storagenode.DB, log *zap.Logger) (storagenode.DB, error) {
@@ -974,6 +1106,7 @@ func TestAuditRepairedSegmentInExcludedCountries(t *testing.T) {
 			Satellite: testplanet.Combine(
 				func(log *zap.Logger, index int, config *satellite.Config) {
 					config.Repairer.InMemoryRepair = true
+					config.Repairer.MaxExcessRateOptimalThreshold = 0.0
 				},
 				testplanet.ReconfigureRS(3, 5, 8, 10),
 				testplanet.RepairExcludedCountryCodes([]string{"FR", "BE"}),
@@ -985,7 +1118,7 @@ func TestAuditRepairedSegmentInExcludedCountries(t *testing.T) {
 		// stop audit to prevent possible interactions i.e. repair timeout problems
 		satellite.Audit.Worker.Loop.Pause()
 
-		satellite.Repair.Checker.Loop.Pause()
+		satellite.RangedLoop.RangedLoop.Service.Loop.Stop()
 		satellite.Repair.Repairer.Loop.Pause()
 
 		var testData = testrand.Bytes(8 * memory.KiB)
@@ -1006,16 +1139,16 @@ func TestAuditRepairedSegmentInExcludedCountries(t *testing.T) {
 			nodesInExcluded = append(nodesInExcluded, remotePieces[i].StorageNode)
 		}
 
-		// make extra pieces after optimal bad
+		// make extra pieces after optimal bad, so we know there are exactly OptimalShares
+		// retrievable shares. numExcluded of them are in an excluded country.
 		for i := int(segment.Redundancy.OptimalShares); i < len(remotePieces); i++ {
 			err = planet.StopNodeAndUpdate(ctx, planet.FindNode(remotePieces[i].StorageNode))
 			require.NoError(t, err)
 		}
 
-		// trigger checker to add segment to repair queue
-		satellite.Repair.Checker.Loop.Restart()
-		satellite.Repair.Checker.Loop.TriggerWait()
-		satellite.Repair.Checker.Loop.Pause()
+		// trigger repair checker with ranged loop to add segment to repair queue
+		_, err = satellite.RangedLoop.RangedLoop.Service.RunOnce(ctx)
+		require.NoError(t, err)
 
 		count, err := satellite.DB.RepairQueue().Count(ctx)
 		require.NoError(t, err)
@@ -1036,17 +1169,29 @@ func TestAuditRepairedSegmentInExcludedCountries(t *testing.T) {
 		require.NotEqual(t, segment.Pieces, segmentAfterRepair.Pieces)
 		require.Equal(t, 10, len(segmentAfterRepair.Pieces))
 
-		// check excluded area nodes still exist
-		for i, n := range nodesInExcluded {
-			var found bool
+		// the number of nodes that should still be online holding intact pieces, not in
+		// excluded countries
+		expectHealthyNodes := int(segment.Redundancy.OptimalShares) - numExcluded
+		// repair should make this many new pieces to get the segment up to OptimalShares
+		// shares, not counting excluded-country nodes
+		expectNewPieces := int(segment.Redundancy.OptimalShares) - expectHealthyNodes
+		// so there should be this many pieces after repair, not counting excluded-country
+		// nodes
+		expectPiecesAfterRepair := expectHealthyNodes + expectNewPieces
+		// so there should be this many excluded-country pieces left in the segment (we
+		// couldn't keep all of them, or we would have had more than TotalShares pieces).
+		expectRemainingExcluded := int(segment.Redundancy.TotalShares) - expectPiecesAfterRepair
+
+		found := 0
+		for _, nodeID := range nodesInExcluded {
 			for _, p := range segmentAfterRepair.Pieces {
-				if p.StorageNode == n {
-					found = true
+				if p.StorageNode == nodeID {
+					found++
 					break
 				}
 			}
-			require.True(t, found, fmt.Sprintf("node %s not in segment, but should be\n", segmentAfterRepair.Pieces[i].StorageNode.String()))
 		}
+		require.Equal(t, expectRemainingExcluded, found, "found wrong number of excluded-country pieces after repair")
 		nodesInPointer := make(map[storj.NodeID]bool)
 		for _, n := range segmentAfterRepair.Pieces {
 			// check for duplicates
@@ -1073,7 +1218,15 @@ func TestAuditRepairedSegmentInExcludedCountries(t *testing.T) {
 		}, nil)
 		require.NoError(t, err)
 		require.Len(t, report.Fails, 1)
-		require.Equal(t, report.Fails[0], lastPiece.StorageNode)
+		require.Equal(t, metabase.Piece{
+			StorageNode: lastPiece.StorageNode,
+			Number:      lastPiece.Number,
+		}, report.Fails[0])
+		require.NotNil(t, report.Segment)
+		assert.Equal(t, segmentAfterRepair.StreamID, report.Segment.StreamID)
+		assert.Equal(t, segmentAfterRepair.Position, report.Segment.Position)
+		assert.Equal(t, segmentAfterRepair.Redundancy, report.Segment.Redundancy)
+		assert.Equal(t, segmentAfterRepair.Pieces, report.Segment.Pieces)
 	})
 }
 
@@ -1106,7 +1259,7 @@ func getRemoteSegment(
 func corruptPieceData(ctx context.Context, t *testing.T, planet *testplanet.Planet, corruptedNode *testplanet.StorageNode, corruptedPieceID storj.PieceID) {
 	t.Helper()
 
-	blobRef := storage.BlobRef{
+	blobRef := blobstore.BlobRef{
 		Namespace: planet.Satellites[0].ID().Bytes(),
 		Key:       corruptedPieceID.Bytes(),
 	}
@@ -1142,7 +1295,7 @@ func corruptPieceData(ctx context.Context, t *testing.T, planet *testplanet.Plan
 }
 
 func TestIdentifyContainedNodes(t *testing.T) {
-	testWithChoreAndObserver(t, testplanet.Config{
+	testWithRangedLoop(t, testplanet.Config{
 		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
 		satellite := planet.Satellites[0]
@@ -1187,5 +1340,371 @@ func TestIdentifyContainedNodes(t *testing.T) {
 		require.Len(t, gotContainedNodes, 1)
 		_, ok := gotContainedNodes[containedNode]
 		require.True(t, ok, "expected node to be indicated as contained, but it was not")
+	})
+}
+
+func TestConcurrentAuditsSuccess(t *testing.T) {
+	const (
+		numConcurrentAudits = 10
+		minPieces           = 5
+	)
+
+	testWithRangedLoop(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: minPieces, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			// every segment gets a piece on every node, so that every segment audit
+			// hits the same set of nodes, and every node is touched by every audit
+			Satellite: testplanet.ReconfigureRS(minPieces, minPieces, minPieces, minPieces),
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
+
+		satellite := planet.Satellites[0]
+		audits := satellite.Audit
+
+		audits.Worker.Loop.Pause()
+		audits.ReverifyWorker.Loop.Pause()
+		pauseQueueing(satellite)
+
+		ul := planet.Uplinks[0]
+
+		for n := 0; n < numConcurrentAudits; n++ {
+			testData := testrand.Bytes(8 * memory.KiB)
+			err := ul.Upload(ctx, satellite, "testbucket", fmt.Sprintf("test/path/%d", n), testData)
+			require.NoError(t, err)
+		}
+
+		listResult, err := satellite.Metabase.DB.ListVerifySegments(ctx, metabase.ListVerifySegments{Limit: numConcurrentAudits})
+		require.NoError(t, err)
+		require.Len(t, listResult.Segments, numConcurrentAudits)
+
+		// do all the audits at the same time; at least some nodes will get more than one at the same time
+		group, auditCtx := errgroup.WithContext(ctx)
+		reports := make([]audit.Report, numConcurrentAudits)
+
+		for n, seg := range listResult.Segments {
+			n := n
+			seg := seg
+			group.Go(func() error {
+				report, err := audits.Verifier.Verify(auditCtx, audit.Segment{
+					StreamID: seg.StreamID,
+					Position: seg.Position,
+				}, nil)
+				if err != nil {
+					return err
+				}
+				reports[n] = report
+				return nil
+			})
+		}
+		err = group.Wait()
+		require.NoError(t, err)
+
+		for _, report := range reports {
+			require.Len(t, report.Fails, 0)
+			require.Len(t, report.Unknown, 0)
+			require.Len(t, report.PendingAudits, 0)
+			require.Len(t, report.Offlines, 0)
+			require.Equal(t, len(report.Successes), minPieces)
+
+			// apply the audit results, as the audit worker would have done
+			audits.Reporter.RecordAudits(ctx, report)
+		}
+
+		// nothing should be in the reverify queue
+		_, err = audits.ReverifyQueue.GetNextJob(ctx, time.Minute)
+		require.Error(t, err)
+		require.True(t, audit.ErrEmptyQueue.Has(err), err)
+	})
+}
+
+func TestConcurrentAuditsUnknownError(t *testing.T) {
+	const (
+		numConcurrentAudits = 10
+		minPieces           = 5
+		badNodes            = minPieces / 2
+	)
+
+	testWithRangedLoop(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: minPieces, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			// every segment gets a piece on every node, so that every segment audit
+			// hits the same set of nodes, and every node is touched by every audit
+			Satellite: testplanet.ReconfigureRS(minPieces-badNodes, minPieces, minPieces, minPieces),
+			StorageNodeDB: func(index int, db storagenode.DB, log *zap.Logger) (storagenode.DB, error) {
+				return testblobs.NewBadDB(log.Named("baddb"), db), nil
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
+
+		satellite := planet.Satellites[0]
+		audits := satellite.Audit
+
+		audits.Worker.Loop.Pause()
+		audits.ReverifyWorker.Loop.Pause()
+		pauseQueueing(satellite)
+
+		ul := planet.Uplinks[0]
+
+		for n := 0; n < numConcurrentAudits; n++ {
+			testData := testrand.Bytes(8 * memory.KiB)
+			err := ul.Upload(ctx, satellite, "testbucket", fmt.Sprintf("test/path/%d", n), testData)
+			require.NoError(t, err)
+		}
+
+		listResult, err := satellite.Metabase.DB.ListVerifySegments(ctx, metabase.ListVerifySegments{Limit: numConcurrentAudits})
+		require.NoError(t, err)
+		require.Len(t, listResult.Segments, numConcurrentAudits)
+
+		// make ~half of the nodes time out on all responses
+		for n := 0; n < badNodes; n++ {
+			planet.StorageNodes[n].DB.(*testblobs.BadDB).SetError(fmt.Errorf("an unrecognized error"))
+		}
+
+		// do all the audits at the same time; at least some nodes will get more than one at the same time
+		group, auditCtx := errgroup.WithContext(ctx)
+		reports := make([]audit.Report, numConcurrentAudits)
+
+		for n, seg := range listResult.Segments {
+			n := n
+			seg := seg
+			group.Go(func() error {
+				report, err := audits.Verifier.Verify(auditCtx, audit.Segment{
+					StreamID: seg.StreamID,
+					Position: seg.Position,
+				}, nil)
+				if err != nil {
+					return err
+				}
+				reports[n] = report
+				return nil
+			})
+		}
+		err = group.Wait()
+		require.NoError(t, err)
+
+		for _, report := range reports {
+			require.Len(t, report.Fails, 0)
+			require.Len(t, report.Unknown, badNodes)
+			require.Len(t, report.PendingAudits, 0)
+			require.Len(t, report.Offlines, 0)
+			require.Equal(t, len(report.Successes), minPieces-badNodes)
+
+			// apply the audit results, as the audit worker would have done
+			audits.Reporter.RecordAudits(ctx, report)
+		}
+
+		// nothing should be in the reverify queue
+		_, err = audits.ReverifyQueue.GetNextJob(ctx, time.Minute)
+		require.Error(t, err)
+		require.True(t, audit.ErrEmptyQueue.Has(err), err)
+	})
+}
+
+func TestConcurrentAuditsFailure(t *testing.T) {
+	const (
+		numConcurrentAudits = 10
+		minPieces           = 5
+		badNodes            = minPieces / 2
+	)
+
+	testWithRangedLoop(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: minPieces, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			// every segment gets a piece on every node, so that every segment audit
+			// hits the same set of nodes, and every node is touched by every audit
+			Satellite: testplanet.ReconfigureRS(minPieces-badNodes, minPieces, minPieces, minPieces),
+			StorageNodeDB: func(index int, db storagenode.DB, log *zap.Logger) (storagenode.DB, error) {
+				return testblobs.NewBadDB(log.Named("baddb"), db), nil
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
+
+		satellite := planet.Satellites[0]
+		audits := satellite.Audit
+
+		audits.Worker.Loop.Pause()
+		audits.ReverifyWorker.Loop.Pause()
+		pauseQueueing(satellite)
+
+		ul := planet.Uplinks[0]
+
+		for n := 0; n < numConcurrentAudits; n++ {
+			testData := testrand.Bytes(8 * memory.KiB)
+			err := ul.Upload(ctx, satellite, "testbucket", fmt.Sprintf("test/path/%d", n), testData)
+			require.NoError(t, err)
+		}
+
+		listResult, err := satellite.Metabase.DB.ListVerifySegments(ctx, metabase.ListVerifySegments{Limit: numConcurrentAudits})
+		require.NoError(t, err)
+		require.Len(t, listResult.Segments, numConcurrentAudits)
+
+		// make ~half of the nodes return a Not Found error on all responses
+		for n := 0; n < badNodes; n++ {
+			// Can't make _all_ calls return errors, or the directory read verification will fail
+			// (as it is triggered explicitly when ErrNotExist is returned from Open) and cause the
+			// node to panic before the test is done.
+			planet.StorageNodes[n].DB.(*testblobs.BadDB).SetError(os.ErrNotExist)
+		}
+
+		// do all the audits at the same time; at least some nodes will get more than one at the same time
+		group, auditCtx := errgroup.WithContext(ctx)
+		reports := make([]audit.Report, numConcurrentAudits)
+
+		for n, seg := range listResult.Segments {
+			n := n
+			seg := seg
+			group.Go(func() error {
+				report, err := audits.Verifier.Verify(auditCtx, audit.Segment{
+					StreamID: seg.StreamID,
+					Position: seg.Position,
+				}, nil)
+				if err != nil {
+					return err
+				}
+				reports[n] = report
+				return nil
+			})
+		}
+		err = group.Wait()
+		require.NoError(t, err)
+
+		for n, report := range reports {
+			require.Len(t, report.Unknown, 0, n)
+			require.Len(t, report.PendingAudits, 0, n)
+			require.Len(t, report.Offlines, 0, n)
+			require.Len(t, report.Fails, badNodes, n)
+			require.Equal(t, len(report.Successes), minPieces-badNodes, n)
+
+			// apply the audit results, as the audit worker would have done
+			audits.Reporter.RecordAudits(ctx, report)
+		}
+
+		// nothing should be in the reverify queue
+		_, err = audits.ReverifyQueue.GetNextJob(ctx, time.Minute)
+		require.Error(t, err)
+		require.True(t, audit.ErrEmptyQueue.Has(err), err)
+	})
+}
+
+func TestConcurrentAuditsTimeout(t *testing.T) {
+	const (
+		numConcurrentAudits = 10
+		minPieces           = 5
+		slowNodes           = minPieces / 2
+		retryInterval       = 5 * time.Minute
+	)
+
+	testWithRangedLoop(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: minPieces, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			// every segment should get a piece on every node, so that every segment audit
+			// hits the same set of nodes, and every node is touched by every audit
+			Satellite: testplanet.Combine(
+				func(log *zap.Logger, index int, config *satellite.Config) {
+					// These config values are chosen to cause relatively quick timeouts
+					// while allowing the non-slow nodes to complete operations
+					config.Audit.MinBytesPerSecond = 100 * memory.KiB
+					config.Audit.MinDownloadTimeout = time.Second
+				},
+				testplanet.ReconfigureRS(minPieces-slowNodes, minPieces, minPieces, minPieces),
+			),
+			StorageNodeDB: func(index int, db storagenode.DB, log *zap.Logger) (storagenode.DB, error) {
+				return testblobs.NewSlowDB(log.Named("slowdb"), db), nil
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet, pauseQueueing pauseQueueingFunc, runQueueingOnce runQueueingOnceFunc) {
+
+		satellite := planet.Satellites[0]
+		audits := satellite.Audit
+
+		audits.Worker.Loop.Pause()
+		audits.ReverifyWorker.Loop.Pause()
+		pauseQueueing(satellite)
+
+		ul := planet.Uplinks[0]
+
+		for n := 0; n < numConcurrentAudits; n++ {
+			testData := testrand.Bytes(8 * memory.KiB)
+			err := ul.Upload(ctx, satellite, "testbucket", fmt.Sprintf("test/path/%d", n), testData)
+			require.NoError(t, err)
+		}
+
+		listResult, err := satellite.Metabase.DB.ListVerifySegments(ctx, metabase.ListVerifySegments{Limit: numConcurrentAudits})
+		require.NoError(t, err)
+		require.Len(t, listResult.Segments, numConcurrentAudits)
+
+		// make ~half of the nodes time out on all responses
+		for n := 0; n < slowNodes; n++ {
+			planet.StorageNodes[n].DB.(*testblobs.SlowDB).SetLatency(time.Hour)
+		}
+
+		// do all the audits at the same time; at least some nodes will get more than one at the same time
+		group, auditCtx := errgroup.WithContext(ctx)
+		reports := make([]audit.Report, numConcurrentAudits)
+
+		for n, seg := range listResult.Segments {
+			n := n
+			seg := seg
+			group.Go(func() error {
+				report, err := audits.Verifier.Verify(auditCtx, audit.Segment{
+					StreamID: seg.StreamID,
+					Position: seg.Position,
+				}, nil)
+				if err != nil {
+					return err
+				}
+				reports[n] = report
+				return nil
+			})
+		}
+		err = group.Wait()
+		require.NoError(t, err)
+
+		rq := audits.ReverifyQueue.(interface {
+			audit.ReverifyQueue
+			TestingFudgeUpdateTime(ctx context.Context, pendingAudit *audit.PieceLocator, updateTime time.Time) error
+		})
+
+		for _, report := range reports {
+			require.Len(t, report.Fails, 0)
+			require.Len(t, report.Unknown, 0)
+			require.Len(t, report.PendingAudits, slowNodes)
+			require.Len(t, report.Offlines, 0)
+			require.Equal(t, len(report.Successes), minPieces-slowNodes)
+
+			// apply the audit results, as the audit worker would have done
+			audits.Reporter.RecordAudits(ctx, report)
+
+			// fudge the insert time backward by retryInterval so the jobs will be available to GetNextJob
+			for _, pending := range report.PendingAudits {
+				err := rq.TestingFudgeUpdateTime(ctx, &pending.Locator, time.Now().Add(-retryInterval))
+				require.NoError(t, err)
+			}
+		}
+
+		// the slow nodes should have been added to the reverify queue multiple times;
+		// once for each timed-out piece fetch
+		queuedReverifies := make([]*audit.ReverificationJob, 0, numConcurrentAudits*slowNodes)
+		for {
+			job, err := audits.ReverifyQueue.GetNextJob(ctx, retryInterval)
+			if err != nil {
+				if audit.ErrEmptyQueue.Has(err) {
+					break
+				}
+				require.NoError(t, err)
+			}
+			queuedReverifies = append(queuedReverifies, job)
+		}
+		require.Len(t, queuedReverifies, numConcurrentAudits*slowNodes)
+
+		appearancesPerNode := make(map[storj.NodeID]int)
+		for _, job := range queuedReverifies {
+			appearancesPerNode[job.Locator.NodeID]++
+		}
+
+		require.Len(t, appearancesPerNode, slowNodes)
+		for n := 0; n < slowNodes; n++ {
+			require.EqualValues(t, appearancesPerNode[planet.StorageNodes[n].ID()], numConcurrentAudits)
+		}
 	})
 }

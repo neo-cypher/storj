@@ -16,12 +16,13 @@ import (
 	"storj.io/common/testrand"
 	"storj.io/common/uuid"
 	"storj.io/storj/private/testplanet"
+	"storj.io/storj/satellite/buckets"
 	"storj.io/storj/satellite/console"
 	"storj.io/storj/satellite/metabase"
 )
 
-func newTestBucket(name string, projectID uuid.UUID) storj.Bucket {
-	return storj.Bucket{
+func newTestBucket(name string, projectID uuid.UUID) buckets.Bucket {
+	return buckets.Bucket{
 		ID:                  testrand.UUID(),
 		Name:                name,
 		ProjectID:           projectID,
@@ -82,7 +83,12 @@ func TestBasicBucketOperations(t *testing.T) {
 		require.False(t, minimalBucket.CreatedAt.IsZero())
 
 		_, err = bucketsDB.GetMinimalBucket(ctx, []byte("not-existing-bucket"), project.ID)
-		require.True(t, storj.ErrBucketNotFound.Has(err), err)
+		require.True(t, buckets.ErrBucketNotFound.Has(err), err)
+
+		// GetBucketVersioningState
+		versioningState, err := bucketsDB.GetBucketVersioningState(ctx, []byte("testbucket"), project.ID)
+		require.NoError(t, err)
+		require.Equal(t, buckets.VersioningUnsupported, versioningState)
 
 		// GetBucketPlacement
 		placement, err := bucketsDB.GetBucketPlacement(ctx, []byte("testbucket"), project.ID)
@@ -90,7 +96,7 @@ func TestBasicBucketOperations(t *testing.T) {
 		require.Equal(t, expectedBucket.Placement, placement)
 
 		_, err = bucketsDB.GetBucketPlacement(ctx, []byte("not-existing-bucket"), project.ID)
-		require.True(t, storj.ErrBucketNotFound.Has(err), err)
+		require.True(t, buckets.ErrBucketNotFound.Has(err), err)
 
 		// CountBuckets
 		count, err = bucketsDB.CountBuckets(ctx, project.ID)
@@ -155,9 +161,9 @@ func TestListBucketsAllAllowed(t *testing.T) {
 			tt := tt // avoid scopelint error
 			t.Run(tt.name, func(t *testing.T) {
 
-				listOpts := storj.BucketListOptions{
+				listOpts := buckets.ListOptions{
 					Cursor:    tt.cursor,
-					Direction: storj.Forward,
+					Direction: buckets.DirectionForward,
 					Limit:     tt.limit,
 				}
 				bucketList, err := bucketsDB.ListBuckets(ctx, project.ID, listOpts, allowedBuckets)
@@ -212,9 +218,9 @@ func TestListBucketsNotAllowed(t *testing.T) {
 
 		for _, tt := range testCases {
 			tt := tt // avoid scopelint error
-			listOpts := storj.BucketListOptions{
+			listOpts := buckets.ListOptions{
 				Cursor:    tt.cursor,
-				Direction: storj.Forward,
+				Direction: buckets.DirectionForward,
 				Limit:     tt.limit,
 			}
 			t.Run(tt.name, func(t *testing.T) {
@@ -288,6 +294,12 @@ func TestBatchBuckets(t *testing.T) {
 				require.False(t, more)
 			}
 		}
+
+		// check if invalid bucket name 'a\' won't throw an error
+		_, err := db.Buckets().IterateBucketLocations(ctx, uuid.UUID{}, "a\\", 1, func(bucketLocations []metabase.BucketLocation) (err error) {
+			return nil
+		})
+		require.NoError(t, err)
 	})
 }
 

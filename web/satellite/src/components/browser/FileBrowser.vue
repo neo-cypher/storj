@@ -9,8 +9,10 @@
                     v-cloak
                     class="div-responsive"
                     @drop.prevent="upload"
-                    @dragover.prevent
+                    @dragover.prevent="showDropzone"
                 >
+                    <Dropzone v-if="isOver" :bucket="bucketName" :close="hideDropzone" />
+
                     <bread-crumbs @onUpdate="onRouteChange" @bucketClick="goToBuckets" />
 
                     <div class="tile-action-bar">
@@ -90,72 +92,35 @@
 
                     <div class="hr-divider" />
 
-                    <v-table class="file-browser-table">
+                    <MultiplePassphraseBanner
+                        v-if="lockedFilesEntryDisplayed && isLockedBanner"
+                        :on-close="closeLockedBanner"
+                    />
+
+                    <TooManyObjectsBanner
+                        v-if="!isPaginationEnabled && files.length >= NUMBER_OF_DISPLAYED_OBJECTS && isTooManyObjectsBanner"
+                        :on-close="closeTooManyObjectsBanner"
+                    />
+
+                    <v-table
+                        items-label="objects"
+                        selectable
+                        :selected="allFilesSelected"
+                        :limit="isPaginationEnabled ? cursor.limit : 0"
+                        :total-page-count="isPaginationEnabled ? pageCount : 0"
+                        :total-items-count="isPaginationEnabled ? fetchedObjectsCount : files.length"
+                        show-select
+                        :loading="isLoading"
+                        class="file-browser-table"
+                        :on-page-change="isPaginationEnabled ? changePageAndLimit : null"
+                        :page-number="cursor.page"
+                        @selectAllClicked="toggleSelectAllFiles"
+                    >
                         <template #head>
                             <file-browser-header />
                         </template>
                         <template #body>
-                            <tr
-                                v-for="file in formattedFilesUploading"
-                                :key="file.ETag"
-                            >
-                                <!-- using <th> to comply with common Vtable.vue-->
-                                <th
-                                    class="align-left data"
-                                    aria-roledescription="file-uploading"
-                                >
-                                    <p class="file-name">
-                                        <file-icon />
-                                        <span>{{ filename(file) }}</span>
-                                    </p>
-                                </th>
-                                <th class="align-left data" aria-roledescription="progress-bar">
-                                    <div class="progress">
-                                        <div
-                                            class="progress-bar"
-                                            role="progressbar"
-                                            :style="{
-                                                width: `${file.progress}%`
-                                            }"
-                                        >
-                                            {{ file.progress }}%
-                                        </div>
-                                    </div>
-                                </th>
-                                <th class="align-left data">
-                                    <v-button
-                                        width="60px"
-                                        font-size="14px"
-                                        label="Cancel" :is-deletion="true"
-                                        :on-press="() => cancelUpload(file.Key)"
-                                    />
-                                </th>
-                                <th />
-                            </tr>
-
-                            <tr v-if="filesUploading.length" class="files-uploading-count">
-                                <th class="align-left data files-uploading-count__content" aria-roledescription="files-uploading-count">
-                                    {{ formattedFilesWaitingToBeUploaded }}
-                                    waiting to be uploaded...
-                                </th>
-                                <th class="files-uploading-count__content" />
-                                <th class="files-uploading-count__content" />
-                                <th class="files-uploading-count__content" />
-                            </tr>
-
-                            <tr v-if="path.length > 0" class="up-button">
-                                <th class="align-left data up-button__content">
-                                    <span @click.prevent="onBack">
-                                        <a
-                                            id="navigate-back"
-                                            href="javascript:null"
-                                        >...</a>
-                                    </span>
-                                </th>
-                                <th class="up-button__content" />
-                                <th class="up-button__content" />
-                                <th class="up-button__content" />
-                            </tr>
+                            <up-entry v-if="path.length > 0" :on-back="onBack" />
 
                             <file-entry
                                 v-for="file in folders"
@@ -174,7 +139,7 @@
                         </template>
                     </v-table>
                     <div
-                        v-if="!fetchingFilesSpinner"
+                        v-if="!isLoading"
                         class="upload-help"
                         @click="buttonFileUpload"
                     >
@@ -183,12 +148,6 @@
                             Drop Files Here to Upload
                         </p>
                     </div>
-                    <div
-                        v-else
-                        class="d-flex justify-content-center"
-                    >
-                        <div class="spinner-border" />
-                    </div>
                 </div>
             </div>
         </div>
@@ -196,126 +155,234 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeMount, ref } from 'vue';
+import { computed, onBeforeMount, onBeforeUnmount, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 
 import FileBrowserHeader from './FileBrowserHeader.vue';
 import FileEntry from './FileEntry.vue';
 import BreadCrumbs from './BreadCrumbs.vue';
 
-import { AnalyticsHttpApi } from '@/api/analytics';
-import { BrowserFile } from '@/types/browser';
 import { AnalyticsErrorEventSource, AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
-import { RouteConfig } from '@/router';
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
-import { useNotify, useRouter, useStore } from '@/utils/hooks';
-import eventBus from '@/utils/eventBus';
+import { RouteConfig } from '@/types/router';
+import { useNotify } from '@/utils/hooks';
+import { Bucket } from '@/types/buckets';
+import { MODALS } from '@/utils/constants/appStatePopUps';
+import {
+    BrowserObject,
+    MAX_KEY_COUNT,
+    ObjectBrowserCursor,
+    useObjectBrowserStore,
+} from '@/store/modules/objectBrowserStore';
+import { useAppStore } from '@/store/modules/appStore';
+import { useBucketsStore } from '@/store/modules/bucketsStore';
+import { useConfigStore } from '@/store/modules/configStore';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
+import { DEFAULT_PAGE_LIMIT } from '@/types/pagination';
+import { useLoading } from '@/composables/useLoading';
 
 import VButton from '@/components/common/VButton.vue';
 import BucketSettingsNav from '@/components/objects/BucketSettingsNav.vue';
 import VTable from '@/components/common/VTable.vue';
+import MultiplePassphraseBanner from '@/components/browser/MultiplePassphrasesBanner.vue';
+import TooManyObjectsBanner from '@/components/browser/TooManyObjectsBanner.vue';
+import UpEntry from '@/components/browser/UpEntry.vue';
+import Dropzone from '@/components/browser/Dropzone.vue';
 
-import FileIcon from '@/../static/images/objects/file.svg';
 import BlackArrowExpand from '@/../static/images/common/BlackArrowExpand.svg';
 import UploadIcon from '@/../static/images/browser/upload.svg';
-import BlackArrowHide from '@/../static/images/common/BlackArrowHide.svg';
 
-const store = useStore();
+const bucketsStore = useBucketsStore();
+const appStore = useAppStore();
+const obStore = useObjectBrowserStore();
+const configStore = useConfigStore();
+const analyticsStore = useAnalyticsStore();
+
 const router = useRouter();
+const route = useRoute();
 const notify = useNotify();
+const { isLoading, withLoading } = useLoading();
 
-const folderInput = ref<HTMLInputElement>(null);
-const fileInput = ref<HTMLInputElement>(null);
+const folderInput = ref<HTMLInputElement>();
+const fileInput = ref<HTMLInputElement>();
 
-const fetchingFilesSpinner = ref<boolean>(false);
 const isUploadDropDownShown = ref<boolean>(false);
+const isLockedBanner = ref<boolean>(true);
+const isTooManyObjectsBanner = ref<boolean>(true);
+const isOver = ref<boolean>(false);
+/**
+ * Retrieve the pathMatch from the current route.
+ */
+const routePath = ref(calculateRoutePath());
 
-const analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
+const NUMBER_OF_DISPLAYED_OBJECTS = 1000;
+const routePageCache = new Map<string, number>();
+
+/**
+ * Calculates page count depending on object count and page limit.
+ */
+const pageCount = computed((): number => {
+    return Math.ceil(fetchedObjectsCount.value / cursor.value.limit);
+});
+
+/**
+ * Returns fetched object count from store.
+ */
+const fetchedObjectsCount = computed((): number => {
+    return obStore.state.totalObjectCount;
+});
+
+/**
+ * Returns table cursor from store.
+ */
+const cursor = computed((): ObjectBrowserCursor => {
+    return obStore.state.cursor;
+});
 
 /**
  * Check if the s3 client has been initialized in the store.
  */
 const isInitialized = computed((): boolean => {
-    return store.getters['files/isInitialized'];
+    return obStore.isInitialized;
+});
+
+/**
+ * Indicates if pagination should be used.
+ */
+const isPaginationEnabled = computed((): boolean => {
+    return configStore.state.config.objectBrowserPaginationEnabled;
 });
 
 /**
  * Retrieve the current path from the store.
  */
 const path = computed((): string => {
-    return store.state.files.path;
+    return obStore.state.path;
 });
 
 /**
- * Return files that are currently being uploaded from the store.
+ * Return file browser path from store.
  */
-const filesUploading = computed((): string => {
-    return store.state.files.uploading;
+const currentPath = computed((): string => {
+    return obStore.state.path;
 });
 
 /**
- * Return up to five files currently being uploaded for display purposes.
+ * Returns bucket objects count from store.
  */
-const formattedFilesUploading = computed((): string => {
-    if (filesUploading.value.length > 5) {
-        return filesUploading.value.slice(0, 5);
-    }
+const bucketObjectsCount = computed((): number => {
+    const name: string = obStore.state.bucket;
+    const data: Bucket | undefined = bucketsStore.state.page.buckets.find(bucket => bucket.name === name);
 
-    return filesUploading.value;
+    return data?.objectCount ?? 0;
 });
 
 /**
- * Return the text of how many files in total are being uploaded to be displayed to give users more context.
+ * Indicates if locked files entry is displayed.
  */
-const formattedFilesWaitingToBeUploaded = computed((): string => {
-    let file = 'file';
-
-    if (filesUploading.value.length > 1) {
-        file = 'files';
-    }
-
-    return `${filesUploading.value.length} ${file}`;
+const lockedFilesEntryDisplayed = computed((): boolean => {
+    return bucketObjectsCount.value > 0 &&
+        obStore.state.objectsCount === 0 &&
+        !isLoading.value &&
+        !currentPath.value;
 });
 
 const bucketName = computed((): string => {
-    return store.state.files.bucket;
+    return obStore.state.bucket;
 });
 
-const files = computed((): BrowserFile[] => {
-    return store.getters['files/sortedFiles'];
+/**
+ * Whether all files are selected.
+ * */
+const allFilesSelected = computed((): boolean => {
+    if (files.value.length === 0) {
+        return false;
+    }
+    const shiftSelectedFiles = obStore.state.shiftSelectedFiles;
+    const selectedFiles = obStore.state.selectedFiles;
+    const selectedAnchorFile = obStore.state.selectedAnchorFile;
+    const allSelectedFiles = [
+        ...selectedFiles,
+        ...shiftSelectedFiles,
+    ];
+
+    if (selectedAnchorFile && !allSelectedFiles.includes(selectedAnchorFile)) {
+        allSelectedFiles.push(selectedAnchorFile);
+    }
+    return allSelectedFiles.length === files.value.length;
+});
+
+const files = computed((): BrowserObject[] => {
+    return isPaginationEnabled.value ? obStore.displayedObjects : obStore.sortedFiles;
 });
 
 /**
  * Return an array of BrowserFile type that are files and not folders.
  */
-const singleFiles = computed((): BrowserFile[] => {
+const singleFiles = computed((): BrowserObject[] => {
     return files.value.filter((f) => f.type === 'file');
 });
 
 /**
  * Return an array of BrowserFile type that are folders and not files.
  */
-const folders = computed((): BrowserFile[] => {
+const folders = computed((): BrowserObject[] => {
     return files.value.filter((f) => f.type === 'folder');
 });
-
-/**
- * Retrieve the pathMatch from the current route.
- */
-const routePath = ref(calculateRoutePath());
 
 /**
  * Returns bucket name from store.
  */
 const bucket = computed((): string => {
-    return store.state.objectsModule.fileComponentBucketName;
+    return bucketsStore.state.fileComponentBucketName;
 });
 
+/**
+ * Changes table page and limit.
+ */
+async function changePageAndLimit(page: number, limit: number): Promise<void> {
+    routePageCache.set(routePath.value, page);
+    obStore.setCursor({ limit, page });
+
+    const lastObjectOnPage = page * limit;
+    const activeRange = obStore.state.activeObjectsRange;
+
+    if (lastObjectOnPage > activeRange.start && lastObjectOnPage <= activeRange.end) {
+        return;
+    }
+
+    await withLoading(async () => {
+        const tokenKey = Math.ceil(lastObjectOnPage / MAX_KEY_COUNT) * MAX_KEY_COUNT;
+
+        const tokenToBeFetched = obStore.state.continuationTokens.get(tokenKey);
+        if (!tokenToBeFetched) {
+            await obStore.initList(routePath.value);
+            return;
+        }
+
+        await obStore.listByToken(routePath.value, tokenKey, tokenToBeFetched);
+    });
+}
+
+/**
+ * Closes multiple passphrase banner.
+ */
+function closeLockedBanner(): void {
+    isLockedBanner.value = false;
+}
+
+/**
+ * Closes too many objects banner.
+ */
+function closeTooManyObjectsBanner(): void {
+    isTooManyObjectsBanner.value = false;
+}
+
 function calculateRoutePath(): string {
-    let pathMatch = router.history.current.params.pathMatch;
+    let pathMatch = route.params.pathMatch;
     pathMatch = Array.isArray(pathMatch)
         ? pathMatch.join('/') + '/'
         : pathMatch;
-    return pathMatch;
+    return pathMatch || '';
 }
 
 async function onBack(): Promise<void> {
@@ -325,66 +392,48 @@ async function onBack(): Promise<void> {
 
 async function onRouteChange(): Promise<void> {
     routePath.value = calculateRoutePath();
-    await store.dispatch('files/closeDropdown');
-    await list(routePath.value);
-}
+    obStore.closeDropdown();
 
-/**
- * Set spinner state. If routePath is not present navigate away. If there's some error re-render the page with a call to list. All of this is done on the created lifecycle method.
- */
-onBeforeMount(async () => {
-    if (!bucket.value) {
-        const path = RouteConfig.Buckets.with(RouteConfig.BucketsManagement).path;
+    await withLoading(async () => {
+        if (isPaginationEnabled.value) {
+            await obStore.initList(routePath.value);
+        } else {
+            await list(routePath.value);
+        }
+    });
 
-        analytics.pageVisit(path);
-        await router.push(path);
-
-        return;
-    }
-
-    // display the spinner while files are being fetched
-    fetchingFilesSpinner.value = true;
-
-    if (!routePath.value) {
-        try {
-            await router.push({
-                path: `${store.state.files.browserRoot}${path.value}`,
-            });
-            analytics.pageVisit(`${store.state.files.browserRoot}${path.value}`);
-        } catch (err) {
-            await list('');
-            analytics.errorEventTriggered(AnalyticsErrorEventSource.FILE_BROWSER);
+    if (isPaginationEnabled.value) {
+        const cachedPage = routePageCache.get(routePath.value);
+        if (cachedPage !== undefined) {
+            obStore.setCursor({ limit: cursor.value.limit, page: cachedPage });
+        } else {
+            obStore.setCursor({ limit: cursor.value.limit, page: 1 });
         }
     }
-
-    // remove the spinner after files have been fetched
-    fetchingFilesSpinner.value = false;
-});
+}
 
 /**
  * Close modal, file share modal, dropdown, and remove all selected files from the store.
  */
 function closeModalDropdown(): void {
-    if (store.state.files.openedDropdown) {
-        store.dispatch('files/closeDropdown');
+    if (obStore.state.openedDropdown) {
+        obStore.closeDropdown();
     }
 
-    if (store.state.files.selectedFile) {
-        store.dispatch('files/clearAllSelectedFiles');
-    }
+    obStore.clearAllSelectedFiles();
 }
 
 /**
  * Toggle the folder creation modal in the store.
  */
 function toggleFolderCreationModal(): void {
-    store.commit(APP_STATE_MUTATIONS.TOGGLE_NEW_FOLDER_MODAL_SHOWN);
+    appStore.updateActiveModal(MODALS.newFolder);
 }
 
 /**
  * Return the file name of the passed in file argument formatted.
  */
-function filename(file: BrowserFile): string {
+function filename(file: BrowserObject): string {
     return file.Key.length > 25
         ? file.Key.slice(0, 25) + '...'
         : file.Key;
@@ -394,20 +443,14 @@ function filename(file: BrowserFile): string {
  * Upload the current selected or dragged-and-dropped file.
  */
 async function upload(e: Event): Promise<void> {
-    const callback = () => {
-        eventBus.$emit('upload_progress');
-    };
-    await store.dispatch('files/upload', { e, callback });
-    await analytics.eventTriggered(AnalyticsEvent.OBJECT_UPLOADED);
+    if (isOver.value) {
+        isOver.value = false;
+    }
+
+    await obStore.upload({ e });
+    analyticsStore.eventTriggered(AnalyticsEvent.OBJECT_UPLOADED);
     const target = e.target as HTMLInputElement;
     target.value = '';
-}
-
-/**
- * Cancel the upload of the current file that's passed in as an argument.
- */
-function cancelUpload(fileName: string): void {
-    store.dispatch('files/cancelUpload', fileName);
 }
 
 /**
@@ -415,13 +458,10 @@ function cancelUpload(fileName: string): void {
  */
 async function list(path: string): Promise<void> {
     try {
-        await store.dispatch('files/list', path, {
-            root: true,
-        });
+        await obStore.list(path);
     } catch (error) {
-        notify.error(error.message, AnalyticsErrorEventSource.FILE_BROWSER);
+        notify.error(error.message, AnalyticsErrorEventSource.FILE_BROWSER_LIST_CALL);
     }
-
 }
 
 /**
@@ -430,7 +470,7 @@ async function list(path: string): Promise<void> {
 async function buttonFileUpload(): Promise<void> {
     const fileInputElement = fileInput.value as HTMLInputElement;
     fileInputElement.showPicker();
-    analytics.eventTriggered(AnalyticsEvent.UPLOAD_FILE_CLICKED);
+    analyticsStore.eventTriggered(AnalyticsEvent.UPLOAD_FILE_CLICKED);
     closeUploadDropdown();
 }
 
@@ -440,7 +480,7 @@ async function buttonFileUpload(): Promise<void> {
 async function buttonFolderUpload(): Promise<void> {
     const folderInputElement = folderInput.value as HTMLInputElement;
     folderInputElement.showPicker();
-    analytics.eventTriggered(AnalyticsEvent.UPLOAD_FOLDER_CLICKED);
+    analyticsStore.eventTriggered(AnalyticsEvent.UPLOAD_FOLDER_CLICKED);
     closeUploadDropdown();
 }
 
@@ -449,6 +489,20 @@ async function buttonFolderUpload(): Promise<void> {
  */
 function toggleUploadDropdown(): void {
     isUploadDropDownShown.value = !isUploadDropDownShown.value;
+}
+
+/**
+ * Makes dropzone visible.
+ */
+function showDropzone(): void {
+    isOver.value = true;
+}
+
+/**
+ * Hides dropzone.
+ */
+function hideDropzone(): void {
+    isOver.value = false;
 }
 
 /**
@@ -462,15 +516,86 @@ function closeUploadDropdown(): void {
  * Redirects to buckets list view.
  */
 async function goToBuckets(): Promise<void> {
-    await router.push(RouteConfig.Buckets.with(RouteConfig.BucketsManagement).path).catch(err => {});
-    analytics.pageVisit(RouteConfig.Buckets.with(RouteConfig.BucketsManagement).path);
+    await router.push(RouteConfig.Buckets.with(RouteConfig.BucketsManagement).path).catch(_ => {});
+    analyticsStore.pageVisit(RouteConfig.Buckets.with(RouteConfig.BucketsManagement).path);
     await onRouteChange();
 }
+
+/**
+ * Toggles the selection of all files.
+ * */
+function toggleSelectAllFiles(): void {
+    if (files.value.length === 0) {
+        return;
+    }
+
+    if (allFilesSelected.value) {
+        obStore.clearAllSelectedFiles();
+    } else {
+        obStore.clearAllSelectedFiles();
+        obStore.setSelectedAnchorFile(files.value[0]);
+        obStore.updateSelectedFiles(files.value.slice(1, files.value.length));
+    }
+}
+
+/**
+ * Set spinner state. If routePath is not present navigate away.
+ * If there's some error then re-render the page with a call to list.
+ */
+onBeforeMount(async () => {
+    if (!bucket.value) {
+        const path = RouteConfig.Buckets.with(RouteConfig.BucketsManagement).path;
+
+        analyticsStore.pageVisit(path);
+        await router.push(path);
+
+        return;
+    }
+
+    // clear previous file selections.
+    obStore.clearAllSelectedFiles();
+
+    await withLoading(async () => {
+        try {
+            if (isPaginationEnabled.value) {
+                await Promise.all([
+                    obStore.initList(''),
+                    obStore.getObjectCount(),
+                ]);
+            } else {
+                await Promise.all([
+                    list(''),
+                    obStore.getObjectCount(),
+                ]);
+            }
+        } catch (error) {
+            notify.error(error.message, AnalyticsErrorEventSource.FILE_BROWSER_LIST_CALL);
+        }
+    });
+});
+
+onBeforeUnmount(() => {
+    obStore.setCursor({ limit: DEFAULT_PAGE_LIMIT, page: 1 });
+});
 </script>
 
 <style scoped lang="scss">
 .file-browser {
     min-height: 500px;
+}
+
+.hide-mobile {
+    @media screen and (width <= 550px) {
+        display: none;
+    }
+}
+
+@media screen and (width <= 550px) {
+    // hide size, upload date columns on mobile screens
+
+    :deep(.data:not(:nth-child(2))) {
+        display: none;
+    }
 }
 
 .position-relative {
@@ -493,7 +618,6 @@ async function goToBuckets(): Promise<void> {
 }
 
 .file-browser-table {
-    border: 1px solid var(--c-grey-3);
     box-shadow: none;
 }
 
@@ -511,7 +635,7 @@ async function goToBuckets(): Promise<void> {
     svg {
         width: 300px;
 
-        @media screen and (max-width: 425px) {
+        @media screen and (width <= 425px) {
             width: unset;
         }
     }
@@ -701,10 +825,10 @@ async function goToBuckets(): Promise<void> {
     align-items: center;
     margin: 1.5em 0;
 
-    @media screen and (max-width: 768px) {
+    @media screen and (width <= 768px) {
         flex-direction: column;
-        justify-content: start;
-        align-items: start;
+        justify-content: flex-start;
+        align-items: flex-start;
     }
 
     &__title {
@@ -714,14 +838,14 @@ async function goToBuckets(): Promise<void> {
         line-height: 1.2;
         word-break: break-all;
 
-        @media screen and (max-width: 768px) {
+        @media screen and (width <= 768px) {
             margin-bottom: 0.5rem;
         }
     }
 
     &__actions {
         display: flex;
-        justify-content: start;
+        justify-content: flex-start;
         flex-wrap: wrap;
         gap: 5px;
     }

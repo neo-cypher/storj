@@ -2,49 +2,69 @@
 // See LICENSE for copying information.
 
 <template>
-    <div class="register-success-container">
-        <div class="register-success-container__logo-wrapper">
+    <div class="register-success-area">
+        <div class="register-success-area__logo-wrapper">
             <LogoIcon class="logo" @click="onLogoClick" />
         </div>
-        <div class="register-success-area">
-            <div class="register-success-area__form-container">
-                <MailIcon />
-                <h2 class="register-success-area__form-container__title" aria-roledescription="title">You're almost there!</h2>
-                <div v-if="showManualActivationMsg" class="register-success-area__form-container__sub-title">
+        <div class="register-success-area__container">
+            <MailIcon />
+            <template v-if="codeActivationEnabled">
+                <h2 class="register-success-area__container__title" aria-roledescription="title">Check your inbox</h2>
+                <p class="register-success-area__container__sub-title">
+                    Enter the 6 digit confirmation code you received in your email to verify your account:
+                </p>
+                <div class="register-success-area__container__code-input">
+                    <ConfirmMFAInput label="Activation code" :on-input="onConfirmInput" :is-error="isError" />
+                </div>
+                <div v-if="codeActivationEnabled" class="register-success-area__container__button-container">
+                    <VButton
+                        label="Verify"
+                        width="450px"
+                        height="50px"
+                        :on-press="onVerifyClicked"
+                        :is-disabled="code.length !== 6 || isLoading"
+                    />
+                </div>
+            </template>
+            <template v-else>
+                <h2 class="register-success-area__container__title" aria-roledescription="title">You're almost there!</h2>
+                <div v-if="showManualActivationMsg" class="register-success-area__container__sub-title fill">
                     If an account with the email address
-                    <p class="register-success-area__form-container__sub-title__email">{{ userEmail }}</p>
+                    <p class="register-success-area__container__sub-title__email">{{ userEmail }}</p>
                     exists, a verification email has been sent.
                 </div>
-                <p class="register-success-area__form-container__sub-title">
+                <p class="register-success-area__container__sub-title">
                     Check your inbox to activate your account and get started.
                 </p>
-                <p class="register-success-area__form-container__text">
+                <p class="register-success-area__container__text">
                     Didn't receive a verification email?
-                    <b class="register-success-area__form-container__verification-cooldown__bold-text">
+                    <b class="register-success-area__container__verification-cooldown__bold-text">
                         {{ timeToEnableResendEmailButton }}
                     </b>
                 </p>
-                <div class="register-success-area__form-container__button-container">
-                    <VButton
-                        label="Resend Email"
-                        width="450px"
-                        height="50px"
-                        :on-press="onResendEmailButtonClick"
-                        :is-disabled="secondsToWait !== 0"
-                    />
-                </div>
-                <p class="register-success-area__form-container__contact">
-                    or
-                    <a
-                        class="register-success-area__form-container__contact__link"
-                        href="https://supportdcs.storj.io/hc/en-us/requests/new"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                    >
-                        Contact our support team
-                    </a>
-                </p>
+            </template>
+
+            <div class="register-success-area__container__button-container">
+                <VButton
+                    :label="resendMailLabel"
+                    width="450px"
+                    height="50px"
+                    :is-white="codeActivationEnabled"
+                    :on-press="onResendEmailButtonClick"
+                    :is-disabled="secondsToWait !== 0 || isLoading"
+                />
             </div>
+            <p class="register-success-area__container__contact">
+                or
+                <a
+                    class="register-success-area__container__contact__link"
+                    href="https://supportdcs.storj.io/hc/en-us/requests/new"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >
+                    Contact our support team
+                </a>
+            </p>
         </div>
         <router-link :to="loginPath" class="register-success-area__login-link">Go to Login page</router-link>
     </div>
@@ -52,42 +72,55 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 
 import { AuthHttpApi } from '@/api/auth';
-import { RouteConfig } from '@/router';
-import { useNotify, useRoute } from '@/utils/hooks';
+import { RouteConfig } from '@/types/router';
+import { useNotify } from '@/utils/hooks';
+import { useConfigStore } from '@/store/modules/configStore';
+import { useLoading } from '@/composables/useLoading';
+import { LocalData } from '@/utils/localData';
+import { useUsersStore } from '@/store/modules/usersStore';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
+import { ErrorUnauthorized } from '@/api/errors/ErrorUnauthorized';
 
+import ConfirmMFAInput from '@/components/account/mfa/ConfirmMFAInput.vue';
 import VButton from '@/components/common/VButton.vue';
 
-import LogoIcon from '@/../static/images/logo.svg';
 import MailIcon from '@/../static/images/register/mail.svg';
+import LogoIcon from '@/../static/images/logo.svg';
 
 const props = withDefaults(defineProps<{
-    email: string;
-    showManualActivationMsg: boolean;
+    email?: string;
+    signupReqId?: string;
+    showManualActivationMsg?: boolean;
 }>(), {
     email: '',
+    signupReqId: '',
     showManualActivationMsg: true,
 });
 
+const analyticsStore = useAnalyticsStore();
+const configStore = useConfigStore();
+const usersStore = useUsersStore();
+
+const router = useRouter();
 const route = useRoute();
 const notify = useNotify();
+
+const { isLoading, withLoading } = useLoading();
 
 const auth: AuthHttpApi = new AuthHttpApi();
 const loginPath: string = RouteConfig.Login.path;
 
 const secondsToWait = ref<number>(30);
 const intervalId = ref<ReturnType<typeof setInterval>>();
+const isError = ref<boolean>(false);
+const code = ref<string>('');
+const signupId = ref<string>(props.signupReqId || '');
 
 const userEmail = computed((): string => {
-    return props.email || route.query.email.toString();
-});
-
-/**
- * Checks if page is inside iframe.
- */
-const isInsideIframe = computed((): boolean => {
-    return window.self !== window.top;
+    return props.email || route.query.email?.toString() || '';
 });
 
 /**
@@ -95,6 +128,21 @@ const isInsideIframe = computed((): boolean => {
  */
 const timeToEnableResendEmailButton = computed((): string => {
     return `${Math.floor(secondsToWait.value / 60).toString().padStart(2, '0')}:${(secondsToWait.value % 60).toString().padStart(2, '0')}`;
+});
+
+/**
+ * Returns true if signup activation code is enabled.
+ */
+const codeActivationEnabled = computed((): boolean => {
+    // code activation is not available if this page was arrived at via a link.
+    return  configStore.state.config.signupActivationCodeEnabled && !!props.email;
+});
+
+/**
+ * Returns the text for the resend email button.
+ */
+const resendMailLabel = computed((): string => {
+    return  !codeActivationEnabled.value ? 'Resend Email' : `Resend Email${secondsToWait.value !== 0 ? ' in ' + timeToEnableResendEmailButton.value : ''}`;
 });
 
 /**
@@ -122,17 +170,49 @@ function startResendEmailCountdown(): void {
  */
 async function onResendEmailButtonClick(): Promise<void> {
     const email = userEmail.value;
-    if (secondsToWait.value != 0 || !email) {
+    if (secondsToWait.value !== 0 || !email) {
         return;
     }
 
     try {
-        await auth.resendEmail(email);
+        signupId.value = await auth.resendEmail(email);
     } catch (error) {
-        await notify.error(error.message, null);
+        notify.notifyError(error);
     }
 
     startResendEmailCountdown();
+}
+
+/**
+ * Handles code verification.
+ */
+function onVerifyClicked(): void {
+    withLoading(async () => {
+        try {
+            const tokenInfo = await auth.verifySignupCode(props.email, code.value, signupId.value);
+            LocalData.setSessionExpirationDate(tokenInfo.expiresAt);
+        } catch (error) {
+            if (error instanceof ErrorUnauthorized) {
+                notify.notifyError(new Error('Invalid code'));
+                return;
+            }
+            notify.notifyError(error);
+            isError.value = true;
+            return;
+        }
+
+        usersStore.login();
+        analyticsStore.pageVisit(RouteConfig.AllProjectsDashboard.path);
+        await router.push(RouteConfig.AllProjectsDashboard.path);
+    });
+}
+
+/**
+ * Sets confirmation passcode value from input.
+ */
+function onConfirmInput(value: string): void {
+    isError.value = false;
+    code.value = value;
 }
 
 /**
@@ -153,48 +233,34 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped lang="scss">
-    .register-success-container {
+    .register-success-area {
         display: flex;
         flex-direction: column;
         align-items: center;
         font-family: 'font_regular', sans-serif;
         background-color: #f5f6fa;
+        padding: 0 20px;
+        box-sizing: border-box;
         position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
+        inset: 0;
         overflow-y: scroll;
 
         &__logo-wrapper {
             text-align: center;
             margin-top: 60px;
-
-            svg {
-                width: 207px;
-                height: 37px;
-            }
         }
-    }
 
-    .register-success-area {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: 'font_regular', sans-serif;
-        background-color: #fff;
-        border-radius: 20px;
-        width: 75%;
-        height: 50vh;
-        margin-top: 50px;
-        padding: 70px 90px 30px;
-        max-width: 1200px;
-
-        &__form-container {
-            text-align: center;
+        &__container {
             display: flex;
             flex-direction: column;
             align-items: center;
+            box-sizing: border-box;
+            text-align: center;
+            background-color: var(--c-white);
+            border-radius: 20px;
+            width: 75%;
+            margin-top: 50px;
+            padding: 40px;
 
             &__title {
                 font-family: 'font_bold', sans-serif;
@@ -212,6 +278,10 @@ onBeforeUnmount(() => {
                 max-width: 350px;
                 text-align: center;
                 margin-bottom: 27px;
+
+                &.fill {
+                    max-width: unset;
+                }
 
                 &__email {
                     font-family: 'font_bold', sans-serif;
@@ -245,14 +315,23 @@ onBeforeUnmount(() => {
                 margin-top: 15px;
             }
 
+            &__code-input {
+                width: 450px;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                margin-top: 10px;
+                margin-bottom: 10px;
+            }
+
             &__contact {
                 margin-top: 20px;
 
                 &__link {
-                    color: #376fff;
+                    color: var(--c-light-blue-5);
 
                     &:visited {
-                        color: #376fff;
+                        color: var(--c-light-blue-5);
                     }
                 }
             }
@@ -262,35 +341,17 @@ onBeforeUnmount(() => {
             font-family: 'font_bold', sans-serif;
             text-decoration: none;
             font-size: 14px;
-            color: #376fff;
+            color: var(--c-light-blue-5);
             margin-top: 50px;
             padding-bottom: 50px;
         }
     }
 
-    @media screen and (max-width: 650px) {
+    @media screen and (width <= 750px) {
 
-        .register-success-area {
-            height: auto;
-
-            &__form-container {
-                padding: 50px;
-            }
-        }
-
-        :deep(.container) {
-            width: 100% !important;
-        }
-    }
-
-    @media screen and (max-width: 500px) {
-
-        .register-success-area {
-            height: auto;
-
-            &__form-container {
-                padding: 50px 20px;
-            }
+        .register-success-area__container {
+            width: 100%;
+            padding: 60px;
         }
     }
 </style>

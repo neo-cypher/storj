@@ -12,6 +12,7 @@ import (
 	"github.com/zeebo/errs"
 
 	"storj.io/common/memory"
+	"storj.io/common/storj"
 	"storj.io/common/uuid"
 	"storj.io/storj/satellite/console"
 	"storj.io/storj/satellite/satellitedb/dbx"
@@ -65,12 +66,60 @@ func (projects *projects) GetCreatedBefore(ctx context.Context, before time.Time
 // GetByUserID is a method for querying all projects from the database by userID.
 func (projects *projects) GetByUserID(ctx context.Context, userID uuid.UUID) (_ []console.Project, err error) {
 	defer mon.Task()(&ctx)(&err)
-	projectsDbx, err := projects.db.All_Project_By_ProjectMember_MemberId_OrderBy_Asc_Project_Name(ctx, dbx.ProjectMember_MemberId(userID[:]))
+
+	rows, err := projects.sdb.Query(ctx, projects.sdb.Rebind(`
+		SELECT
+			projects.id,
+			projects.public_id,
+			projects.name,
+			projects.description,
+			projects.owner_id,
+			projects.rate_limit,
+			projects.max_buckets,
+			projects.created_at,
+			COALESCE(projects.default_placement, 0),
+			(SELECT COUNT(*) FROM project_members WHERE project_id = projects.id) AS member_count
+		FROM projects
+		JOIN project_members ON projects.id = project_members.project_id
+		WHERE project_members.member_id = ?
+		ORDER BY name ASC
+	`), userID)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { err = errs.Combine(err, rows.Close()) }()
 
-	return projectsFromDbxSlice(ctx, projectsDbx)
+	nextProject := &console.Project{}
+	var rateLimit, maxBuckets sql.NullInt32
+	projectsToSend := make([]console.Project, 0)
+	for rows.Next() {
+		err = rows.Scan(
+			&nextProject.ID,
+			&nextProject.PublicID,
+			&nextProject.Name,
+			&nextProject.Description,
+			&nextProject.OwnerID,
+			&rateLimit,
+			&maxBuckets,
+			&nextProject.CreatedAt,
+			&nextProject.DefaultPlacement,
+			&nextProject.MemberCount,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if rateLimit.Valid {
+			nextProject.RateLimit = new(int)
+			*nextProject.RateLimit = int(rateLimit.Int32)
+		}
+		if maxBuckets.Valid {
+			nextProject.MaxBuckets = new(int)
+			*nextProject.MaxBuckets = int(maxBuckets.Int32)
+		}
+		projectsToSend = append(projectsToSend, *nextProject)
+	}
+
+	return projectsToSend, rows.Err()
 }
 
 // Get is a method for querying project from the database by id.
@@ -99,20 +148,6 @@ func (projects *projects) GetSalt(ctx context.Context, id uuid.UUID) (salt []byt
 		idHash := sha256.Sum256(id[:])
 		salt = idHash[:]
 	}
-
-	return salt, nil
-}
-
-// TestGetSalt returns the project's salt column value from the db.
-func (projects *projects) TestGetSalt(ctx context.Context, id uuid.UUID) (salt []byte, err error) {
-	defer mon.Task()(&ctx)(&err)
-
-	res, err := projects.db.Get_Project_Salt_By_Id(ctx, dbx.Project_Id(id[:]))
-	if err != nil {
-		return nil, err
-	}
-
-	salt = res.Salt
 
 	return salt, nil
 }
@@ -167,6 +202,7 @@ func (projects *projects) Insert(ctx context.Context, project *console.Project) 
 	createFields.MaxBuckets = dbx.Project_MaxBuckets_Raw(project.MaxBuckets)
 	createFields.PublicId = dbx.Project_PublicId(publicID[:])
 	createFields.Salt = dbx.Project_Salt(salt[:])
+	createFields.DefaultPlacement = dbx.Project_DefaultPlacement(int(project.DefaultPlacement))
 
 	createdProject, err := projects.db.Create_Project(ctx,
 		dbx.Project_Id(projectID[:]),
@@ -218,6 +254,9 @@ func (projects *projects) Update(ctx context.Context, project *console.Project) 
 		updateFields.SegmentLimit = dbx.Project_SegmentLimit(*project.SegmentLimit)
 	}
 
+	if project.DefaultPlacement > 0 {
+		updateFields.DefaultPlacement = dbx.Project_DefaultPlacement(int(project.DefaultPlacement))
+	}
 	_, err = projects.db.Update_Project_By_Id(ctx,
 		dbx.Project_Id(project.ID[:]),
 		updateFields)
@@ -226,17 +265,22 @@ func (projects *projects) Update(ctx context.Context, project *console.Project) 
 }
 
 // UpdateRateLimit is a method for updating projects rate limit.
-func (projects *projects) UpdateRateLimit(ctx context.Context, id uuid.UUID, newLimit int) (err error) {
+func (projects *projects) UpdateRateLimit(ctx context.Context, id uuid.UUID, newLimit *int) (err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	if newLimit < 0 {
+	if newLimit != nil && *newLimit < 0 {
 		return Error.New("limit can't be set to negative value")
+	}
+
+	rateLimit := dbx.Project_RateLimit_Null()
+	if newLimit != nil {
+		rateLimit = dbx.Project_RateLimit(*newLimit)
 	}
 
 	_, err = projects.db.Update_Project_By_Id(ctx,
 		dbx.Project_Id(id[:]),
 		dbx.Project_Update_Fields{
-			RateLimit: dbx.Project_RateLimit(newLimit),
+			RateLimit: rateLimit,
 		})
 
 	return err
@@ -268,6 +312,34 @@ func (projects *projects) UpdateBucketLimit(ctx context.Context, id uuid.UUID, n
 		dbx.Project_Update_Fields{
 			MaxBuckets: dbx.Project_MaxBuckets(newLimit),
 		})
+
+	return err
+}
+
+// UpdateUserAgent is a method for updating projects user agent.
+func (projects *projects) UpdateUserAgent(ctx context.Context, id uuid.UUID, userAgent []byte) (err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	_, err = projects.db.Update_Project_By_Id(ctx,
+		dbx.Project_Id(id[:]),
+		dbx.Project_Update_Fields{
+			UserAgent: dbx.Project_UserAgent(userAgent),
+		})
+
+	return err
+}
+
+// UpdateDefaultPlacement is a method to update the project's default placement for new segments.
+func (projects *projects) UpdateDefaultPlacement(ctx context.Context, id uuid.UUID, placement storj.PlacementConstraint) (err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	_, err = projects.db.Update_Project_By_Id(
+		ctx,
+		dbx.Project_Id(id[:]),
+		dbx.Project_Update_Fields{
+			DefaultPlacement: dbx.Project_DefaultPlacement(int(placement)),
+		},
+	)
 
 	return err
 }
@@ -334,14 +406,23 @@ func (projects *projects) ListByOwnerID(ctx context.Context, ownerID uuid.UUID, 
 	}
 
 	rows, err := projects.sdb.Query(ctx, projects.sdb.Rebind(`
-		SELECT id, public_id, name, description, owner_id, rate_limit, max_buckets, created_at,
+		SELECT
+			id,
+			public_id,
+			name,
+			description,
+			owner_id,
+			rate_limit,
+			max_buckets,
+			created_at,
+			COALESCE(default_placement, 0),
 			(SELECT COUNT(*) FROM project_members WHERE project_id = projects.id) AS member_count
-			FROM projects
-			WHERE owner_id = ?
-			ORDER BY name ASC
-			OFFSET ? ROWS
-			LIMIT ?
-		`), ownerID, page.Offset, page.Limit+1) // add 1 to limit to see if there is another page
+		FROM projects
+		WHERE owner_id = ?
+		ORDER BY name ASC
+		OFFSET ? ROWS
+		LIMIT ?
+	`), ownerID, page.Offset, page.Limit+1) // add 1 to limit to see if there is another page
 	if err != nil {
 		return console.ProjectsPage{}, err
 	}
@@ -359,7 +440,18 @@ func (projects *projects) ListByOwnerID(ctx context.Context, ownerID uuid.UUID, 
 		}
 		var rateLimit, maxBuckets sql.NullInt32
 		nextProject := &console.Project{}
-		err = rows.Scan(&nextProject.ID, &nextProject.PublicID, &nextProject.Name, &nextProject.Description, &nextProject.OwnerID, &rateLimit, &maxBuckets, &nextProject.CreatedAt, &nextProject.MemberCount)
+		err = rows.Scan(
+			&nextProject.ID,
+			&nextProject.PublicID,
+			&nextProject.Name,
+			&nextProject.Description,
+			&nextProject.OwnerID,
+			&rateLimit,
+			&maxBuckets,
+			&nextProject.CreatedAt,
+			&nextProject.DefaultPlacement,
+			&nextProject.MemberCount,
+		)
 		if err != nil {
 			return console.ProjectsPage{}, err
 		}
@@ -409,20 +501,26 @@ func projectFromDBX(ctx context.Context, project *dbx.Project) (_ *console.Proje
 		return nil, err
 	}
 
+	var placement storj.PlacementConstraint
+	if project.DefaultPlacement != nil {
+		placement = storj.PlacementConstraint(*project.DefaultPlacement)
+	}
+
 	return &console.Project{
-		ID:             id,
-		PublicID:       publicID,
-		Name:           project.Name,
-		Description:    project.Description,
-		UserAgent:      userAgent,
-		OwnerID:        ownerID,
-		RateLimit:      project.RateLimit,
-		BurstLimit:     project.BurstLimit,
-		MaxBuckets:     project.MaxBuckets,
-		CreatedAt:      project.CreatedAt,
-		StorageLimit:   (*memory.Size)(project.UsageLimit),
-		BandwidthLimit: (*memory.Size)(project.BandwidthLimit),
-		SegmentLimit:   project.SegmentLimit,
+		ID:               id,
+		PublicID:         publicID,
+		Name:             project.Name,
+		Description:      project.Description,
+		UserAgent:        userAgent,
+		OwnerID:          ownerID,
+		RateLimit:        project.RateLimit,
+		BurstLimit:       project.BurstLimit,
+		MaxBuckets:       project.MaxBuckets,
+		CreatedAt:        project.CreatedAt,
+		StorageLimit:     (*memory.Size)(project.UsageLimit),
+		BandwidthLimit:   (*memory.Size)(project.BandwidthLimit),
+		SegmentLimit:     project.SegmentLimit,
+		DefaultPlacement: placement,
 	}, nil
 }
 
@@ -430,20 +528,14 @@ func projectFromDBX(ctx context.Context, project *dbx.Project) (_ *console.Proje
 func projectsFromDbxSlice(ctx context.Context, projectsDbx []*dbx.Project) (_ []console.Project, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	var projects []console.Project
-	var errors []error
-
-	// Generating []dbo from []dbx and collecting all errors
-	for _, projectDbx := range projectsDbx {
-		project, err := projectFromDBX(ctx, projectDbx)
-		if err != nil {
-			errors = append(errors, err)
-			continue
-		}
-
-		projects = append(projects, *project)
-	}
-
+	projects, errors := convertSliceWithErrors(projectsDbx,
+		func(v *dbx.Project) (r console.Project, _ error) {
+			p, err := projectFromDBX(ctx, v)
+			if err != nil {
+				return r, err
+			}
+			return *p, nil
+		})
 	return projects, errs.Combine(errors...)
 }
 
@@ -470,20 +562,5 @@ func (projects *projects) UpdateUsageLimits(ctx context.Context, id uuid.UUID, l
 			SegmentLimit:   dbx.Project_SegmentLimit(limits.Segment),
 		},
 	)
-	return err
-}
-
-// TestNullifySalt is a temporary method for nullifying the salt column
-// for testing a migration tool (TODO lizzy delete after migration).
-func (projects *projects) TestNullifySalt(ctx context.Context, id uuid.UUID) (err error) {
-	defer mon.Task()(&ctx)(&err)
-
-	var salt []byte
-	row := projects.sdb.QueryRow(ctx, `UPDATE projects SET salt = NULL WHERE id = $1 RETURNING salt`, id)
-	err = row.Scan(&salt)
-	if err != nil {
-		return errs.New("error scanning results: %w", err)
-	}
-
 	return err
 }

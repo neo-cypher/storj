@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,12 +38,19 @@ func TestApiKeyAdd(t *testing.T) {
 		address := planet.Satellites[0].Admin.Admin.Listener.Addr()
 		projectID := planet.Uplinks[0].Projects[0].ID
 
-		keys, err := planet.Satellites[0].DB.Console().APIKeys().GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
+		keys, err := planet.Satellites[0].DB.Console().
+			APIKeys().
+			GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
 		require.NoError(t, err)
 		require.Len(t, keys.APIKeys, 1)
 
 		body := strings.NewReader(`{"name":"Default"}`)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://"+address.String()+"/api/projects/%s/apikeys", projectID.String()), body)
+		req, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodPost,
+			fmt.Sprintf("http://"+address.String()+"/api/projects/%s/apikeys", projectID.String()),
+			body,
+		)
 		require.NoError(t, err)
 		req.Header.Set("Authorization", planet.Satellites[0].Config.Console.AuthToken)
 
@@ -65,7 +73,9 @@ func TestApiKeyAdd(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, apikey)
 
-		keys, err = planet.Satellites[0].DB.Console().APIKeys().GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
+		keys, err = planet.Satellites[0].DB.Console().
+			APIKeys().
+			GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
 		require.NoError(t, err)
 		require.Len(t, keys.APIKeys, 2)
 
@@ -89,7 +99,9 @@ func TestApiKeyDelete(t *testing.T) {
 		address := planet.Satellites[0].Admin.Admin.Listener.Addr()
 		projectID := planet.Uplinks[0].Projects[0].ID
 
-		keys, err := planet.Satellites[0].DB.Console().APIKeys().GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
+		keys, err := planet.Satellites[0].DB.Console().
+			APIKeys().
+			GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
 		require.NoError(t, err)
 		require.Len(t, keys.APIKeys, 1)
 
@@ -99,12 +111,23 @@ func TestApiKeyDelete(t *testing.T) {
 		body := assertReq(ctx, t, link, http.MethodDelete, "", http.StatusOK, "", planet.Satellites[0].Config.Console.AuthToken)
 		require.Len(t, body, 0)
 
-		keys, err = planet.Satellites[0].DB.Console().APIKeys().GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
+		keys, err = planet.Satellites[0].DB.Console().
+			APIKeys().
+			GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
 		require.NoError(t, err)
 		require.Len(t, keys.APIKeys, 0)
 
 		// Delete a deleted key returns Not Found.
-		body = assertReq(ctx, t, link, http.MethodDelete, "", http.StatusNotFound, "", planet.Satellites[0].Config.Console.AuthToken)
+		body = assertReq(
+			ctx,
+			t,
+			link,
+			http.MethodDelete,
+			"",
+			http.StatusNotFound,
+			"",
+			planet.Satellites[0].Config.Console.AuthToken,
+		)
 		require.Contains(t, string(body), "does not exist")
 	})
 }
@@ -123,20 +146,63 @@ func TestApiKeyDelete_ByName(t *testing.T) {
 		address := planet.Satellites[0].Admin.Admin.Listener.Addr()
 		projectID := planet.Uplinks[0].Projects[0].ID
 
-		keys, err := planet.Satellites[0].DB.Console().APIKeys().GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
+		keys, err := planet.Satellites[0].DB.Console().
+			APIKeys().
+			GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
 		require.NoError(t, err)
 		require.Len(t, keys.APIKeys, 1)
 
-		link := fmt.Sprintf("http://"+address.String()+"/api/projects/%s/apikeys/%s", projectID.String(), keys.APIKeys[0].Name)
-		body := assertReq(ctx, t, link, http.MethodDelete, "", http.StatusOK, "", planet.Satellites[0].Config.Console.AuthToken)
+		apiKeyName := keys.APIKeys[0].Name
+
+		link := fmt.Sprintf("http://"+address.String()+"/api/projects/%s/apikeys", projectID.String())
+		body := assertReq(
+			ctx,
+			t,
+			link,
+			http.MethodDelete,
+			"",
+			http.StatusOK,
+			"",
+			planet.Satellites[0].Config.Console.AuthToken,
+			[2]string{"name", apiKeyName},
+		)
 		require.Len(t, body, 0)
 
-		keys, err = planet.Satellites[0].DB.Console().APIKeys().GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
+		// Deleting a key which contains slashes and not exist returns 404. Gorilla Mux returns 405 if
+		// they key would be passed as path parameter regardless if it exists or not, so this tests that
+		// deleting a key whose name contains slashes works as expected and it isn't interpreted as a
+		// path separator.
+		body = assertReq(
+			ctx,
+			t,
+			link,
+			http.MethodDelete,
+			"",
+			http.StatusNotFound,
+			"",
+			planet.Satellites[0].Config.Console.AuthToken,
+			[2]string{"name", "this/is/my_key"},
+		)
+		require.Contains(t, string(body), "does not exist")
+
+		keys, err = planet.Satellites[0].DB.Console().
+			APIKeys().
+			GetPagedByProjectID(ctx, projectID, console.APIKeyCursor{Page: 1, Limit: 10})
 		require.NoError(t, err)
 		require.Len(t, keys.APIKeys, 0)
 
 		// Delete a deleted key returns Not Found.
-		body = assertReq(ctx, t, link, http.MethodDelete, "", http.StatusNotFound, "", planet.Satellites[0].Config.Console.AuthToken)
+		body = assertReq(
+			ctx,
+			t,
+			link,
+			http.MethodDelete,
+			"",
+			http.StatusNotFound,
+			"",
+			planet.Satellites[0].Config.Console.AuthToken,
+			[2]string{"name", apiKeyName},
+		)
 		require.Contains(t, string(body), "does not exist")
 	})
 }
@@ -249,5 +315,100 @@ func TestApiKeysList(t *testing.T) {
 
 		// Check get initial list of API keys.
 		assertGet(ctx, t, link, "[]", authToken)
+	})
+}
+
+func TestAPIKeyManagementGet(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount:   1,
+		StorageNodeCount: 0,
+		UplinkCount:      1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(_ *zap.Logger, _ int, config *satellite.Config) {
+				config.Admin.Address = "127.0.0.1:0"
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		user, err := planet.Satellites[0].AddUser(ctx, console.CreateUser{
+			FullName: "testuser123",
+			Email:    "test@email.com",
+		}, 1)
+		require.NoError(t, err)
+
+		project, err := planet.Satellites[0].AddProject(ctx, user.ID, "testproject")
+		require.NoError(t, err)
+
+		secret, err := macaroon.NewSecret()
+		require.NoError(t, err)
+
+		apiKey, err := macaroon.NewAPIKey(secret)
+		require.NoError(t, err)
+
+		apiKeyInfo, err := planet.Satellites[0].DB.Console().APIKeys().Create(ctx, apiKey.Head(), console.APIKeyInfo{
+			Name:      "testkey",
+			ProjectID: project.ID,
+			Secret:    secret,
+		})
+		require.NoError(t, err)
+
+		userCtx, err := planet.Satellites[0].UserContext(ctx, user.ID)
+		require.NoError(t, err)
+
+		_, err = planet.Satellites[0].API.Console.Service.Payments().AddCreditCard(userCtx, "test")
+		require.NoError(t, err)
+
+		address := planet.Satellites[0].Admin.Admin.Listener.Addr()
+		link := fmt.Sprintf("http://"+address.String()+"/api/apikeys/%s", apiKey.Serialize())
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, link, nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", planet.Satellites[0].Config.Console.AuthToken)
+
+		resp, err := http.DefaultClient.Do(req) //nolint:bodyclose
+		require.NoError(t, err)
+		defer ctx.Check(resp.Body.Close)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		type apiKeyData struct {
+			ID        uuid.UUID `json:"id"`
+			Name      string    `json:"name"`
+			CreatedAt time.Time `json:"createdAt"`
+		}
+		type projectData struct {
+			ID   uuid.UUID `json:"id"`
+			Name string    `json:"name"`
+		}
+		type ownerData struct {
+			ID       uuid.UUID `json:"id"`
+			FullName string    `json:"fullName"`
+			Email    string    `json:"email"`
+			PaidTier bool      `json:"paidTier"`
+		}
+		type response struct {
+			APIKey  apiKeyData  `json:"api_key"`
+			Project projectData `json:"project"`
+			Owner   ownerData   `json:"owner"`
+		}
+
+		var apiResp response
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&apiResp))
+
+		require.Equal(t, response{
+			APIKey: apiKeyData{
+				ID:        apiKeyInfo.ID,
+				Name:      "testkey",
+				CreatedAt: apiKeyInfo.CreatedAt.UTC(),
+			},
+			Project: projectData{
+				ID:   project.ID,
+				Name: "testproject",
+			},
+			Owner: ownerData{
+				ID:       user.ID,
+				FullName: "testuser123",
+				Email:    "test@email.com",
+				PaidTier: true,
+			},
+		}, apiResp)
 	})
 }

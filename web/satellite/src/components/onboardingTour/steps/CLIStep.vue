@@ -2,22 +2,20 @@
 // See LICENSE for copying information.
 
 <template>
-    <div>
+    <div class="wrap">
         <ProgressBar />
         <router-view />
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Vue } from 'vue-property-decorator';
-
+<script setup lang="ts">
 import ProgressBar from '@/components/onboardingTour/steps/cliFlow/ProgressBar.vue';
-
-// @vue/component
-@Component({
-    components: {
-        ProgressBar,
-    },
-})
-export default class OnbCLIStep extends Vue {}
 </script>
+
+<style scoped lang="scss">
+.wrap {
+    @media screen and (width <= 600px) {
+        width: 100%;
+    }
+}
+</style>

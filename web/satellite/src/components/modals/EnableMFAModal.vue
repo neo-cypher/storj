@@ -76,134 +76,128 @@
     </VModal>
 </template>
 
-<script lang="ts">
+<script setup lang="ts">
 import QRCode from 'qrcode';
-import { Component, Vue } from 'vue-property-decorator';
+import { computed, onMounted, ref } from 'vue';
 
-import { USER_ACTIONS } from '@/store/modules/users';
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
-import { AnalyticsHttpApi } from '@/api/analytics';
 import { AnalyticsErrorEventSource, AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
+import { useNotify } from '@/utils/hooks';
+import { useUsersStore } from '@/store/modules/usersStore';
+import { useAppStore } from '@/store/modules/appStore';
+import { useConfigStore } from '@/store/modules/configStore';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 import ConfirmMFAInput from '@/components/account/mfa/ConfirmMFAInput.vue';
 import VButton from '@/components/common/VButton.vue';
 import VModal from '@/components/common/VModal.vue';
 
-// @vue/component
-@Component({
-    components: {
-        ConfirmMFAInput,
-        VButton,
-        VModal,
-    },
-})
-export default class EnableMFAModal extends Vue {
-    public readonly qrLink =
-        `otpauth://totp/${encodeURIComponent(this.$store.getters.user.email)}?secret=${this.userMFASecret}&issuer=${encodeURIComponent(`STORJ ${this.satellite}`)}&algorithm=SHA1&digits=6&period=30`;
-    public isScan = true;
-    public isEnable = false;
-    public isCodes = false;
-    public isError = false;
-    public isLoading = false;
-    public confirmPasscode = '';
+const analyticsStore = useAnalyticsStore();
+const configStore = useConfigStore();
+const appStore = useAppStore();
+const usersStore = useUsersStore();
+const notify = useNotify();
 
-    public $refs!: {
-        canvas: HTMLCanvasElement;
-    };
+const isScan = ref<boolean>(true);
+const isEnable = ref<boolean>(false);
+const isCodes = ref<boolean>(false);
+const isError = ref<boolean>(false);
+const isLoading = ref<boolean>(false);
+const confirmPasscode = ref<string>('');
+const canvas = ref<HTMLCanvasElement>();
 
-    private readonly analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
+/**
+ * Returns satellite name from store.
+ */
+const satellite = computed((): string => {
+    return configStore.state.config.satelliteName;
+});
 
-    /**
-     * Mounted lifecycle hook after initial render.
-     * Renders QR code.
-     */
-    public async mounted(): Promise<void> {
-        try {
-            await QRCode.toCanvas(this.$refs.canvas, this.qrLink);
-        } catch (error) {
-            await this.$notify.error(error.message, AnalyticsErrorEventSource.ENABLE_MFA_MODAL);
-        }
-    }
+/**
+ * Returns pre-generated MFA secret from store.
+ */
+const userMFASecret = computed((): string => {
+    return usersStore.state.userMFASecret;
+});
 
-    /**
-     * Toggles view to Enable MFA state.
-     */
-    public showEnable(): void {
-        this.isScan = false;
-        this.isEnable = true;
-    }
+/**
+ * Returns user MFA recovery codes from store.
+ */
+const userMFARecoveryCodes = computed((): string[] => {
+    return usersStore.state.userMFARecoveryCodes;
+});
 
-    /**
-     * Closes enable MFA modal.
-     */
-    public closeModal(): void {
-        this.$store.commit(APP_STATE_MUTATIONS.TOGGLE_ENABLE_MFA_MODAL_SHOWN);
-    }
+const qrLink = `otpauth://totp/${encodeURIComponent(usersStore.state.user.email)}?secret=${userMFASecret.value}&issuer=${encodeURIComponent(`STORJ ${satellite.value}`)}&algorithm=SHA1&digits=6&period=30`;
 
-    /**
-     * Toggles view to MFA Recovery Codes state.
-     */
-    public async showCodes(): Promise<void> {
-        try {
-            await this.$store.dispatch(USER_ACTIONS.GENERATE_USER_MFA_RECOVERY_CODES);
-            this.isEnable = false;
-            this.isCodes = true;
-        } catch (error) {
-            await this.$notify.error(error.message, AnalyticsErrorEventSource.ENABLE_MFA_MODAL);
-        }
-    }
+/**
+ * Toggles view to Enable MFA state.
+ */
+function showEnable(): void {
+    isScan.value = false;
+    isEnable.value = true;
+}
 
-    /**
-     * Sets confirmation passcode value from input.
-     */
-    public onConfirmInput(value: string): void {
-        this.isError = false;
-        this.confirmPasscode = value;
-    }
+/**
+ * Closes enable MFA modal.
+ */
+function closeModal(): void {
+    appStore.removeActiveModal();
+}
 
-    /**
-     * Enables user MFA and sets view to Recovery Codes state.
-     */
-    public async enable(): Promise<void> {
-        if (!this.confirmPasscode || this.isLoading || this.isError) return;
-
-        this.isLoading = true;
-
-        try {
-            await this.$store.dispatch(USER_ACTIONS.ENABLE_USER_MFA, this.confirmPasscode);
-            await this.$store.dispatch(USER_ACTIONS.GET);
-            await this.showCodes();
-            this.analytics.eventTriggered(AnalyticsEvent.MFA_ENABLED);
-            await this.$notify.success('MFA was enabled successfully');
-        } catch (error) {
-            await this.$notify.error(error.message, AnalyticsErrorEventSource.ENABLE_MFA_MODAL);
-            this.isError = true;
-        }
-
-        this.isLoading = false;
-    }
-
-    /**
-     * Returns satellite name from store.
-     */
-    private get satellite(): string {
-        return this.$store.state.appStateModule.satelliteName;
-    }
-
-    /**
-     * Returns pre-generated MFA secret from store.
-     */
-    private get userMFASecret(): string {
-        return this.$store.state.usersModule.userMFASecret;
-    }
-
-    /**
-     * Returns user MFA recovery codes from store.
-     */
-    private get userMFARecoveryCodes(): string[] {
-        return this.$store.state.usersModule.userMFARecoveryCodes;
+/**
+ * Toggles view to MFA Recovery Codes state.
+ */
+async function showCodes(): Promise<void> {
+    try {
+        await usersStore.generateUserMFARecoveryCodes();
+        isEnable.value = false;
+        isCodes.value = true;
+    } catch (error) {
+        notify.notifyError(error, AnalyticsErrorEventSource.ENABLE_MFA_MODAL);
     }
 }
+
+/**
+ * Sets confirmation passcode value from input.
+ */
+function onConfirmInput(value: string): void {
+    isError.value = false;
+    confirmPasscode.value = value;
+}
+
+/**
+ * Enables user MFA and sets view to Recovery Codes state.
+ */
+async function enable(): Promise<void> {
+    if (!confirmPasscode.value || isLoading.value || isError.value) return;
+
+    isLoading.value = true;
+
+    try {
+        await usersStore.enableUserMFA(confirmPasscode.value);
+        await usersStore.getUser();
+        await showCodes();
+
+        analyticsStore.eventTriggered(AnalyticsEvent.MFA_ENABLED);
+        notify.success('MFA was enabled successfully');
+    } catch (error) {
+        notify.notifyError(error, AnalyticsErrorEventSource.ENABLE_MFA_MODAL);
+        isError.value = true;
+    }
+
+    isLoading.value = false;
+}
+
+/**
+ * Mounted lifecycle hook after initial render.
+ * Renders QR code.
+ */
+onMounted(async (): Promise<void> => {
+    try {
+        await QRCode.toCanvas(canvas.value, qrLink);
+    } catch (error) {
+        notify.error(error.message, AnalyticsErrorEventSource.ENABLE_MFA_MODAL);
+    }
+});
 </script>
 
 <style scoped lang="scss">
@@ -216,7 +210,7 @@ export default class EnableMFAModal extends Vue {
         align-items: center;
         font-family: 'font_regular', sans-serif;
 
-        @media screen and (max-width: 550px) {
+        @media screen and (width <= 550px) {
             padding: 48px 24px;
         }
 
@@ -228,7 +222,7 @@ export default class EnableMFAModal extends Vue {
             color: #000;
             margin: 0 0 30px;
 
-            @media screen and (max-width: 550px) {
+            @media screen and (width <= 550px) {
                 font-size: 24px;
                 line-height: 28px;
                 margin-bottom: 15px;
@@ -242,7 +236,7 @@ export default class EnableMFAModal extends Vue {
             color: #000;
             margin: 0 0 45px;
 
-            @media screen and (max-width: 550px) {
+            @media screen and (width <= 550px) {
                 font-size: 14px;
                 line-height: 18px;
                 margin-bottom: 20px;
@@ -258,7 +252,7 @@ export default class EnableMFAModal extends Vue {
             align-items: center;
             width: calc(100% - 50px);
 
-            @media screen and (max-width: 550px) {
+            @media screen and (width <= 550px) {
                 padding: 15px;
                 width: calc(100% - 30px);
             }
@@ -271,7 +265,7 @@ export default class EnableMFAModal extends Vue {
                 color: #000;
                 margin: 0 0 30px;
 
-                @media screen and (max-width: 550px) {
+                @media screen and (width <= 550px) {
                     margin-bottom: 15px;
                 }
             }
@@ -293,7 +287,7 @@ export default class EnableMFAModal extends Vue {
                     height: 200px !important;
                     width: 200px !important;
 
-                    @media screen and (max-width: 550px) {
+                    @media screen and (width <= 550px) {
                         height: unset !important;
                         width: 100% !important;
                     }
@@ -337,7 +331,7 @@ export default class EnableMFAModal extends Vue {
             margin-top: 30px;
             column-gap: 20px;
 
-            @media screen and (max-width: 550px) {
+            @media screen and (width <= 550px) {
                 flex-direction: column-reverse;
                 column-gap: unset;
                 row-gap: 10px;

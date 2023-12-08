@@ -2,11 +2,11 @@
 // See LICENSE for copying information.
 
 <template>
-    <div 
+    <div
         class="bucket-settings-nav"
-        @click.stop.prevent="isDropdownOpen = !isDropdownOpen" 
-        @mouseenter="isHoveredOver = true" 
-        @mouseleave="isHoveredOver = false"  
+        @click.stop.prevent="isDropdownOpen = !isDropdownOpen"
+        @mouseenter="isHoveredOver = true"
+        @mouseleave="isHoveredOver = false"
     >
         <div class="bucket-settings-nav__button">
             <GearIcon class="bucket-settings-nav__button__icon" :class="{active: isHoveredOver || isDropdownOpen}" />
@@ -28,19 +28,23 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 
-import { RouteConfig } from '@/router';
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
-import { useRoute, useRouter, useStore } from '@/utils/hooks';
+import { RouteConfig } from '@/types/router';
+import { MODALS } from '@/utils/constants/appStatePopUps';
+import { useAppStore } from '@/store/modules/appStore';
+import { useObjectBrowserStore } from '@/store/modules/objectBrowserStore';
+import { ShareType } from '@/types/browser';
 
 import ArrowDownIcon from '@/../static/images/common/dropIcon.svg';
 import DetailsIcon from '@/../static/images/objects/details.svg';
 import ShareIcon from '@/../static/images/objects/share.svg';
 import GearIcon from '@/../static/images/common/gearIcon.svg';
 
+const obStore = useObjectBrowserStore();
+const appStore = useAppStore();
 const router = useRouter();
 const route = useRoute();
-const store = useStore();
 
 const props = defineProps<{
     bucketName: string,
@@ -53,11 +57,11 @@ const isHoveredOver = ref(false);
  * Returns files amount from store.
  */
 const filesCount = computed((): number => {
-    return store.getters['files/sortedFiles'].length;
+    return obStore.sortedFiles.length;
 });
 
 function closeDropdown(): void {
-    if (!isDropdownOpen) return;
+    if (!isDropdownOpen.value) return;
 
     isDropdownOpen.value = false;
 }
@@ -68,9 +72,9 @@ function closeDropdown(): void {
 function onDetailsClick(): void {
     router.push({
         name: RouteConfig.BucketsDetails.name,
-        params: {
+        query: {
             bucketName: props.bucketName,
-            backRoute: route?.name || '',
+            backRoute: route.name as string || '',
         },
     });
 
@@ -81,7 +85,8 @@ function onDetailsClick(): void {
  * Toggles share bucket modal.
  */
 function onShareBucketClick(): void {
-    store.commit(APP_STATE_MUTATIONS.TOGGLE_SHARE_BUCKET_MODAL_SHOWN);
+    appStore.setShareModalType(ShareType.Bucket);
+    appStore.updateActiveModal(MODALS.share);
     isDropdownOpen.value = false;
 }
 </script>

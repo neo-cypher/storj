@@ -31,17 +31,18 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 
-import { PAYMENTS_ACTIONS } from '@/store/modules/payments';
-import { AnalyticsHttpApi } from '@/api/analytics';
 import { AnalyticsErrorEventSource } from '@/utils/constants/analyticsEventNames';
-import { useNotify, useStore } from '@/utils/hooks';
+import { useNotify } from '@/utils/hooks';
 import { useLoading } from '@/composables/useLoading';
+import { useBillingStore } from '@/store/modules/billingStore';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 import VInput from '@/components/common/VInput.vue';
 import ValidationMessage from '@/components/common/ValidationMessage.vue';
 import VButton from '@/components/common/VButton.vue';
 
-const store = useStore();
+const analyticsStore = useAnalyticsStore();
+const billingStore = useBillingStore();
 const notify = useNotify();
 const { isLoading, withLoading } = useLoading();
 
@@ -51,8 +52,6 @@ const showValidationMessage = ref<boolean>(false);
 const isCodeValid = ref<boolean>(false);
 const errorMessage = ref<string>('');
 const couponCode = ref<string>('');
-
-const analytics = new AnalyticsHttpApi();
 
 function setCouponCode(value: string): void {
     couponCode.value = value;
@@ -64,14 +63,14 @@ function setCouponCode(value: string): void {
 async function applyCouponCode(): Promise<void> {
     await withLoading(async () => {
         try {
-            await store.dispatch(PAYMENTS_ACTIONS.APPLY_COUPON_CODE, couponCode.value);
-            await notify.success('Coupon Added!');
+            await billingStore.applyCouponCode(couponCode.value);
+            notify.success('Coupon Added!');
             emit('close');
         } catch (error) {
             errorMessage.value = error.message;
             isCodeValid.value = false;
             showValidationMessage.value = true;
-            await analytics.errorEventTriggered(AnalyticsErrorEventSource.BILLING_APPLY_COUPON_CODE_INPUT);
+            analyticsStore.errorEventTriggered(AnalyticsErrorEventSource.BILLING_APPLY_COUPON_CODE_INPUT);
         } finally {
             isLoading.value = false;
         }

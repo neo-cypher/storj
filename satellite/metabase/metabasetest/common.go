@@ -4,7 +4,6 @@
 package metabasetest
 
 import (
-	"bytes"
 	"sort"
 	"testing"
 	"time"
@@ -39,8 +38,6 @@ func (step Verify) Check(ctx *testcontext.Context, t testing.TB, db *metabase.DB
 	sortRawObjects(step.Objects)
 	sortRawSegments(state.Segments)
 	sortRawSegments(step.Segments)
-	sortRawCopies(state.Copies)
-	sortRawCopies(step.Copies)
 
 	diff := cmp.Diff(metabase.RawState(step), *state,
 		DefaultTimeDiff(),
@@ -65,7 +62,7 @@ func sortBucketTallies(tallies []metabase.BucketTally) {
 
 func sortRawObjects(objects []metabase.RawObject) {
 	sort.Slice(objects, func(i, j int) bool {
-		return objects[i].StreamID.Less(objects[j].StreamID)
+		return objects[i].ObjectStream.Less(objects[j].ObjectStream)
 	})
 }
 
@@ -78,21 +75,9 @@ func sortRawSegments(segments []metabase.RawSegment) {
 	})
 }
 
-func sortRawCopies(copies []metabase.RawCopy) {
-	sort.Slice(copies, func(i, j int) bool {
-		return copies[i].StreamID.Less(copies[j].StreamID)
-	})
-}
-
-func sortDeletedSegments(segments []metabase.DeletedSegmentInfo) {
-	sort.Slice(segments, func(i, j int) bool {
-		return bytes.Compare(segments[i].RootPieceID[:], segments[j].RootPieceID[:]) < 0
-	})
-}
-
 func checkError(t require.TestingT, err error, errClass *errs.Class, errText string) {
 	if errClass != nil {
-		require.True(t, errClass.Has(err), "expected an error %v got %v", *errClass, err)
+		require.True(t, errClass.Has(err), "expected an error %q got %q", *errClass, err)
 	}
 	if errText != "" {
 		require.EqualError(t, err, errClass.New(errText).Error())

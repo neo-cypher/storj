@@ -20,13 +20,16 @@ import (
 	"storj.io/private/version"
 	"storj.io/storj/private/lifecycle"
 	"storj.io/storj/private/version/checker"
+	"storj.io/storj/satellite/accounting"
 	"storj.io/storj/satellite/admin"
+	backoffice "storj.io/storj/satellite/admin/back-office"
+	"storj.io/storj/satellite/analytics"
 	"storj.io/storj/satellite/buckets"
 	"storj.io/storj/satellite/console"
 	"storj.io/storj/satellite/console/restkeys"
 	"storj.io/storj/satellite/metabase"
 	"storj.io/storj/satellite/payments"
-	"storj.io/storj/satellite/payments/stripecoinpayments"
+	"storj.io/storj/satellite/payments/stripe"
 )
 
 // Admin is the satellite core process that runs chores.
@@ -52,15 +55,20 @@ type Admin struct {
 		Service *checker.Service
 	}
 
+	Analytics struct {
+		Service *analytics.Service
+	}
+
 	Payments struct {
 		Accounts payments.Accounts
-		Service  *stripecoinpayments.Service
-		Stripe   stripecoinpayments.StripeClient
+		Service  *stripe.Service
+		Stripe   stripe.Client
 	}
 
 	Admin struct {
 		Listener net.Listener
 		Server   *admin.Server
+		Service  *backoffice.Service
 	}
 
 	Buckets struct {
@@ -74,11 +82,23 @@ type Admin struct {
 	FreezeAccounts struct {
 		Service *console.AccountFreezeService
 	}
+
+	LiveAccounting struct {
+		Cache accounting.Cache
+	}
+
+	ProjectLimits struct {
+		Cache *accounting.ProjectLimitCache
+	}
+
+	Accounting struct {
+		Service *accounting.Service
+	}
 }
 
 // NewAdmin creates a new satellite admin peer.
 func NewAdmin(log *zap.Logger, full *identity.FullIdentity, db DB, metabaseDB *metabase.DB,
-	versionInfo version.Info, config *Config, atomicLogLevel *zap.AtomicLevel) (*Admin, error) {
+	liveAccounting accounting.Cache, versionInfo version.Info, config *Config, atomicLogLevel *zap.AtomicLevel) (*Admin, error) {
 	peer := &Admin{
 		Log:        log,
 		Identity:   full,
@@ -99,8 +119,8 @@ func NewAdmin(log *zap.Logger, full *identity.FullIdentity, db DB, metabaseDB *m
 
 	{ // setup debug
 		var err error
-		if config.Debug.Address != "" {
-			peer.Debug.Listener, err = net.Listen("tcp", config.Debug.Address)
+		if config.Debug.Addr != "" {
+			peer.Debug.Listener, err = net.Listen("tcp", config.Debug.Addr)
 			if err != nil {
 				withoutStack := errors.New(err.Error())
 				peer.Log.Debug("failed to start debug endpoints", zap.Error(withoutStack))
@@ -134,20 +154,32 @@ func NewAdmin(log *zap.Logger, full *identity.FullIdentity, db DB, metabaseDB *m
 		})
 	}
 
+	{ // setup analytics
+		peer.Analytics.Service = analytics.NewService(peer.Log.Named("analytics:service"), config.Analytics, config.Console.SatelliteName)
+
+		peer.Services.Add(lifecycle.Item{
+			Name:  "analytics:service",
+			Run:   peer.Analytics.Service.Run,
+			Close: peer.Analytics.Service.Close,
+		})
+	}
+
 	{ // setup payments
 		pc := config.Payments
 
-		var stripeClient stripecoinpayments.StripeClient
-		var err error
+		var stripeClient stripe.Client
 		switch pc.Provider {
-		default:
-			stripeClient = stripecoinpayments.NewStripeMock(
-				peer.ID(),
+		case "": // just new mock, only used in testing binaries
+			stripeClient = stripe.NewStripeMock(
 				peer.DB.StripeCoinPayments().Customers(),
 				peer.DB.Console().Users(),
 			)
+		case "mock":
+			stripeClient = pc.MockProvider
 		case "stripecoinpayments":
-			stripeClient = stripecoinpayments.NewStripeClient(log, pc.StripeCoinPayments)
+			stripeClient = stripe.NewStripeClient(log, pc.StripeCoinPayments)
+		default:
+			return nil, errs.New("invalid stripe coin payments provider %q", pc.Provider)
 		}
 
 		prices, err := pc.UsagePrice.ToModel()
@@ -160,7 +192,13 @@ func NewAdmin(log *zap.Logger, full *identity.FullIdentity, db DB, metabaseDB *m
 			return nil, errs.Combine(err, peer.Close())
 		}
 
-		peer.Payments.Service, err = stripecoinpayments.NewService(
+		peer.FreezeAccounts.Service = console.NewAccountFreezeService(
+			db.Console(),
+			peer.Analytics.Service,
+			config.Console.AccountFreeze,
+		)
+
+		peer.Payments.Service, err = stripe.NewService(
 			peer.Log.Named("payments.stripe:service"),
 			stripeClient,
 			pc.StripeCoinPayments,
@@ -173,7 +211,9 @@ func NewAdmin(log *zap.Logger, full *identity.FullIdentity, db DB, metabaseDB *m
 			prices,
 			priceOverrides,
 			pc.PackagePlans.Packages,
-			pc.BonusRate)
+			pc.BonusRate,
+			peer.Analytics.Service,
+		)
 
 		if err != nil {
 			return nil, errs.Combine(err, peer.Close())
@@ -181,20 +221,69 @@ func NewAdmin(log *zap.Logger, full *identity.FullIdentity, db DB, metabaseDB *m
 
 		peer.Payments.Stripe = stripeClient
 		peer.Payments.Accounts = peer.Payments.Service.Accounts()
-		peer.FreezeAccounts.Service = console.NewAccountFreezeService(db.Console().AccountFreezeEvents(), db.Console().Users(), db.Console().Projects())
 	}
 
-	{ // setup admin endpoint
+	{ // setup live accounting
+		peer.LiveAccounting.Cache = liveAccounting
+	}
+
+	{ // setup project limits
+		peer.ProjectLimits.Cache = accounting.NewProjectLimitCache(peer.DB.ProjectAccounting(),
+			config.Console.Config.UsageLimits.Storage.Free,
+			config.Console.Config.UsageLimits.Bandwidth.Free,
+			config.Console.Config.UsageLimits.Segment.Free,
+			config.ProjectLimit,
+		)
+	}
+
+	{ // setup accounting project usage
+		peer.Accounting.Service = accounting.NewService(
+			peer.DB.ProjectAccounting(),
+			peer.LiveAccounting.Cache,
+			peer.ProjectLimits.Cache,
+			*metabaseDB,
+			config.LiveAccounting.BandwidthCacheTTL,
+			config.LiveAccounting.AsOfSystemInterval,
+		)
+	}
+
+	{ // setup admin
 		var err error
 		peer.Admin.Listener, err = net.Listen("tcp", config.Admin.Address)
 		if err != nil {
 			return nil, err
 		}
 
+		placement, err := config.Placement.Parse()
+		if err != nil {
+			return nil, err
+		}
+
+		peer.Admin.Service = backoffice.NewService(
+			log.Named("back-office:service"),
+			peer.DB.Console(),
+			peer.DB.ProjectAccounting(),
+			peer.Accounting.Service,
+			placement,
+		)
+
 		adminConfig := config.Admin
 		adminConfig.AuthorizationToken = config.Console.AuthToken
 
-		peer.Admin.Server = admin.NewServer(log.Named("admin"), peer.Admin.Listener, peer.DB, peer.Buckets.Service, peer.REST.Keys, peer.FreezeAccounts.Service, peer.Payments.Accounts, config.Console, adminConfig)
+		peer.Admin.Server = admin.NewServer(
+			log.Named("admin"),
+			peer.Admin.Listener,
+			peer.DB,
+			peer.Buckets.Service,
+			peer.REST.Keys,
+			peer.FreezeAccounts.Service,
+			peer.Analytics.Service,
+			peer.Payments.Accounts,
+			peer.Admin.Service,
+			config.Console,
+			adminConfig,
+		)
+
 		peer.Servers.Add(lifecycle.Item{
 			Name:  "admin",
 			Run:   peer.Admin.Server.Run,

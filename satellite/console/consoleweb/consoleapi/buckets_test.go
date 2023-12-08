@@ -5,19 +5,17 @@ package consoleapi_test
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	"storj.io/common/storj"
 	"storj.io/common/testcontext"
 	"storj.io/common/testrand"
 	"storj.io/storj/private/testplanet"
 	"storj.io/storj/satellite"
+	"storj.io/storj/satellite/buckets"
 	"storj.io/storj/satellite/console"
 )
 
@@ -45,13 +43,13 @@ func Test_AllBucketNames(t *testing.T) {
 		project, err := sat.AddProject(ctx, user.ID, "buckettest")
 		require.NoError(t, err)
 
-		bucket1 := storj.Bucket{
+		bucket1 := buckets.Bucket{
 			ID:        testrand.UUID(),
 			Name:      "testBucket1",
 			ProjectID: project.ID,
 		}
 
-		bucket2 := storj.Bucket{
+		bucket2 := buckets.Bucket{
 			ID:        testrand.UUID(),
 			Name:      "testBucket2",
 			ProjectID: project.ID,
@@ -63,43 +61,24 @@ func Test_AllBucketNames(t *testing.T) {
 		_, err = sat.API.Buckets.Service.CreateBucket(ctx, bucket2)
 		require.NoError(t, err)
 
-		// we are using full name as a password
-		tokenInfo, err := sat.API.Console.Service.Token(ctx, console.AuthUser{Email: user.Email, Password: user.FullName})
-		require.NoError(t, err)
+		testRequest := func(endpointSuffix string) {
+			body, status, err := doRequestWithAuth(ctx, t, sat, user, http.MethodGet, "buckets/bucket-names"+endpointSuffix, nil)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, status)
 
-		client := http.Client{}
+			var output []string
 
-		req, err := http.NewRequestWithContext(ctx, "GET", "http://"+planet.Satellites[0].API.Console.Listener.Addr().String()+"/api/v0/buckets/bucket-names?projectID="+project.ID.String(), nil)
-		require.NoError(t, err)
+			err = json.Unmarshal(body, &output)
+			require.NoError(t, err)
 
-		expire := time.Now().AddDate(0, 0, 1)
-		cookie := http.Cookie{
-			Name:    "_tokenKey",
-			Path:    "/",
-			Value:   tokenInfo.Token.String(),
-			Expires: expire,
+			require.Equal(t, bucket1.Name, output[0])
+			require.Equal(t, bucket2.Name, output[1])
 		}
 
-		req.AddCookie(&cookie)
+		// test using Project.ID
+		testRequest("?projectID=" + project.ID.String())
 
-		result, err := client.Do(req)
-		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, result.StatusCode)
-
-		body, err := io.ReadAll(result.Body)
-		require.NoError(t, err)
-
-		var output []string
-
-		err = json.Unmarshal(body, &output)
-		require.NoError(t, err)
-
-		require.Equal(t, bucket1.Name, output[0])
-		require.Equal(t, bucket2.Name, output[1])
-
-		defer func() {
-			err = result.Body.Close()
-			require.NoError(t, err)
-		}()
+		// test using Project.PublicID
+		testRequest("?publicID=" + project.PublicID.String())
 	})
 }

@@ -18,125 +18,120 @@
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Vue, Watch } from 'vue-property-decorator';
+<script setup lang="ts">
+import { computed, onMounted, ref, watch } from 'vue';
 
-import { OBJECTS_ACTIONS } from '@/store/modules/objects';
 import { LocalData } from '@/utils/localData';
-import { BUCKET_ACTIONS } from '@/store/modules/buckets';
 import { BucketPage } from '@/types/buckets';
-import { AnalyticsHttpApi } from '@/api/analytics';
 import { AnalyticsErrorEventSource } from '@/utils/constants/analyticsEventNames';
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
+import { MODALS } from '@/utils/constants/appStatePopUps';
+import { useNotify } from '@/utils/hooks';
+import { useAppStore } from '@/store/modules/appStore';
+import { useBucketsStore } from '@/store/modules/bucketsStore';
+import { useProjectsStore } from '@/store/modules/projectsStore';
 
 import EncryptionBanner from '@/components/objects/EncryptionBanner.vue';
 import BucketsTable from '@/components/objects/BucketsTable.vue';
 
 import WhitePlusIcon from '@/../static/images/common/plusWhite.svg';
 
-// @vue/component
-@Component({
-    components: {
-        WhitePlusIcon,
-        BucketsTable,
-        EncryptionBanner,
-    },
-})
-export default class BucketsView extends Vue {
-    public isLoading = true;
-    public isServerSideEncryptionBannerHidden = true;
+const bucketsStore = useBucketsStore();
+const appStore = useAppStore();
+const projectsStore = useProjectsStore();
+const notify = useNotify();
 
-    public readonly analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
+const isLoading = ref<boolean>(true);
+const isServerSideEncryptionBannerHidden = ref<boolean>(true);
 
-    /**
-     * Lifecycle hook after initial render.
-     * Sets bucket view.
-     */
-    public async mounted(): Promise<void> {
-        this.isServerSideEncryptionBannerHidden = LocalData.getServerSideEncryptionBannerHidden();
-        await this.setBucketsView();
-    }
+/**
+ * Returns fetched buckets page from store.
+ */
+const bucketsPage = computed((): BucketPage => {
+    return bucketsStore.state.page;
+});
 
-    @Watch('selectedProjectID')
-    public async handleProjectChange(): Promise<void> {
-        this.isLoading = true;
+/**
+ * Indicates if user should be prompt for passphrase.
+ */
+const promptForPassphrase = computed((): boolean => {
+    return bucketsStore.state.promptForPassphrase;
+});
 
-        await this.$store.dispatch(OBJECTS_ACTIONS.CLEAR);
-        await this.setBucketsView();
-    }
+/**
+ * Returns selected project id from store.
+ */
+const selectedProjectID = computed((): string => {
+    return projectsStore.state.selectedProject.id;
+});
 
-    /**
-     * Sets buckets view when needed.
-     */
-    public async setBucketsView(): Promise<void> {
-        try {
-            await this.fetchBuckets();
+/**
+ * Sets buckets view when needed.
+ */
+async function setBucketsView(): Promise<void> {
+    try {
+        await fetchBuckets();
 
-            const wasDemoBucketCreated = LocalData.getDemoBucketCreatedStatus();
+        const wasDemoBucketCreated = LocalData.getDemoBucketCreatedStatus();
 
-            if (this.bucketsPage.buckets.length && !wasDemoBucketCreated) {
-                LocalData.setDemoBucketCreatedStatus();
+        if (bucketsPage.value.buckets.length && !wasDemoBucketCreated) {
+            LocalData.setDemoBucketCreatedStatus();
 
-                return;
-            }
-
-            if (!this.bucketsPage.buckets.length && !wasDemoBucketCreated && !this.promptForPassphrase) {
-                this.$store.commit(APP_STATE_MUTATIONS.TOGGLE_CREATE_BUCKET_MODAL_SHOWN);
-            }
-        } catch (error) {
-            await this.$notify.error(`Failed to setup Buckets view. ${error.message}`, AnalyticsErrorEventSource.BUCKET_PAGE);
-        } finally {
-            this.isLoading = false;
+            return;
         }
-    }
 
-    /**
-     * Fetches bucket using api.
-     */
-    public async fetchBuckets(page = 1): Promise<void> {
-        try {
-            await this.$store.dispatch(BUCKET_ACTIONS.FETCH, page);
-        } catch (error) {
-            await this.$notify.error(`Unable to fetch buckets. ${error.message}`, AnalyticsErrorEventSource.BUCKET_PAGE);
+        if (!bucketsPage.value.buckets.length && !wasDemoBucketCreated && !promptForPassphrase.value) {
+            appStore.updateActiveModal(MODALS.createBucket);
         }
-    }
-
-    /**
-     * Toggles create bucket modal visibility.
-     */
-    public onCreateBucketClick(): void {
-        this.$store.commit(APP_STATE_MUTATIONS.TOGGLE_CREATE_BUCKET_MODAL_SHOWN);
-    }
-
-    /**
-     * Hides server-side encryption banner.
-     */
-    public hideBanner(): void {
-        this.isServerSideEncryptionBannerHidden = true;
-        LocalData.setServerSideEncryptionBannerHidden(true);
-    }
-
-    /**
-     * Returns fetched buckets page from store.
-     */
-    public get bucketsPage(): BucketPage {
-        return this.$store.state.bucketUsageModule.page;
-    }
-
-    /**
-     * Indicates if user should be prompt for passphrase.
-     */
-    public get promptForPassphrase(): boolean {
-        return this.$store.state.objectsModule.promptForPassphrase;
-    }
-
-    /**
-     * Returns selected project id from store.
-     */
-    private get selectedProjectID(): string {
-        return this.$store.getters.selectedProject.id;
+    } catch (error) {
+        notify.error(`Failed to setup Buckets view. ${error.message}`, AnalyticsErrorEventSource.BUCKET_PAGE);
+    } finally {
+        isLoading.value = false;
     }
 }
+
+/**
+ * Fetches bucket using api.
+ */
+async function fetchBuckets(page = 1): Promise<void> {
+    try {
+        await bucketsStore.getBuckets(page, selectedProjectID.value);
+    } catch (error) {
+        notify.error(`Unable to fetch buckets. ${error.message}`, AnalyticsErrorEventSource.BUCKET_PAGE);
+    }
+}
+
+/**
+ * Toggles create bucket modal visibility.
+ */
+function onCreateBucketClick(): void {
+    appStore.updateActiveModal(MODALS.createBucket);
+}
+
+/**
+ * Hides server-side encryption banner.
+ */
+function hideBanner(): void {
+    isServerSideEncryptionBannerHidden.value = true;
+    LocalData.setServerSideEncryptionBannerHidden(true);
+}
+
+/**
+ * Lifecycle hook after initial render.
+ * Sets bucket view.
+ */
+onMounted(async (): Promise<void> => {
+    isServerSideEncryptionBannerHidden.value = LocalData.getServerSideEncryptionBannerHidden();
+    await setBucketsView();
+});
+
+watch(selectedProjectID, async () => {
+    if (!selectedProjectID.value) return;
+
+    isLoading.value = true;
+
+    bucketsStore.clear();
+    await setBucketsView();
+});
 </script>
 
 <style scoped lang="scss">

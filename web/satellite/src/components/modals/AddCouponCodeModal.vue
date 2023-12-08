@@ -12,33 +12,23 @@
     </VModal>
 </template>
 
-<script lang="ts">
-import { Component, Vue } from 'vue-property-decorator';
-
-import { RouteConfig } from '@/router';
-import { AnalyticsHttpApi } from '@/api/analytics';
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
+<script setup lang="ts">
+import { RouteConfig } from '@/types/router';
+import { useAppStore } from '@/store/modules/appStore';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 import AddCouponCodeInput from '@/components/common/AddCouponCodeInput.vue';
 import VModal from '@/components/common/VModal.vue';
 
-// @vue/component
-@Component({
-    components: {
-        AddCouponCodeInput,
-        VModal,
-    },
-})
-export default class AddCouponCodeModal extends Vue {
-    private readonly analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
+const analyticsStore = useAnalyticsStore();
+const appStore = useAppStore();
 
-    /**
-    * Closes add coupon modal.
-    */
-    public onCloseClick(): void {
-        this.analytics.pageVisit(RouteConfig.Account.with(RouteConfig.Billing).path);
-        this.$store.commit(APP_STATE_MUTATIONS.TOGGLE_ADD_COUPON_MODAL_SHOWN);
-    }
+/**
+ * Closes add coupon modal.
+ */
+function onCloseClick(): void {
+    analyticsStore.pageVisit(RouteConfig.Account.with(RouteConfig.Billing).path);
+    appStore.removeActiveModal();
 }
 </script>
 
@@ -47,7 +37,7 @@ export default class AddCouponCodeModal extends Vue {
         width: 500px;
         padding: 32px;
 
-        @media screen and (max-width: 650px) {
+        @media screen and (width <= 650px) {
             width: unset;
             padding: 24px;
         }

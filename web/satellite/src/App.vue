@@ -3,110 +3,86 @@
 
 <template>
     <div id="app">
-        <router-view />
+        <BrandedLoader v-if="isLoading" />
+        <ErrorPage v-else-if="isErrorPageShown" />
+        <router-view v-else />
         <!-- Area for displaying notification -->
         <NotificationArea />
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Vue } from 'vue-property-decorator';
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 
-import { PartneredSatellite } from '@/types/common';
-import { APP_STATE_ACTIONS } from '@/utils/constants/actionNames';
-import { MetaUtils } from '@/utils/meta';
+import { useNotify } from '@/utils/hooks';
+import { useAppStore } from '@/store/modules/appStore';
+import { useConfigStore } from '@/store/modules/configStore';
 
+import ErrorPage from '@/views/ErrorPage.vue';
+import BrandedLoader from '@/components/common/BrandedLoader.vue';
 import NotificationArea from '@/components/notifications/NotificationArea.vue';
 
-// @vue/component
-@Component({
-    components: {
-        NotificationArea,
-    },
-})
-export default class App extends Vue {
-    /**
-     * Lifecycle hook after initial render.
-     * Sets up variables from meta tags from config such satellite name, etc.
-     */
-    public mounted(): void {
-        const satelliteName = MetaUtils.getMetaContent('satellite-name');
-        const partneredSatellitesData = MetaUtils.getMetaContent('partnered-satellites');
-        let partneredSatellitesJSON = [];
-        if (partneredSatellitesData) {
-            partneredSatellitesJSON = JSON.parse(partneredSatellitesData);
-        }
-        const isBetaSatellite = MetaUtils.getMetaContent('is-beta-satellite');
-        const couponCodeBillingUIEnabled = MetaUtils.getMetaContent('coupon-code-billing-ui-enabled');
-        const couponCodeSignupUIEnabled = MetaUtils.getMetaContent('coupon-code-signup-ui-enabled');
-        const isNewProjectDashboard = MetaUtils.getMetaContent('new-project-dashboard');
+const configStore = useConfigStore();
+const appStore = useAppStore();
+const notify = useNotify();
 
-        if (satelliteName) {
-            this.$store.dispatch(APP_STATE_ACTIONS.SET_SATELLITE_NAME, satelliteName);
+const isLoading = ref<boolean>(true);
 
-            if (partneredSatellitesJSON.length) {
-                const partneredSatellites: PartneredSatellite[] = [];
-                partneredSatellitesJSON.forEach((sat: PartneredSatellite) => {
-                    // skip current satellite
-                    if (sat.name !== satelliteName) {
-                        partneredSatellites.push(sat);
-                    }
-                });
-                this.$store.dispatch(APP_STATE_ACTIONS.SET_PARTNERED_SATELLITES, partneredSatellites);
-            }
-        }
+/**
+ * Indicates whether an error page should be shown in place of the router view.
+ */
+const isErrorPageShown = computed<boolean>((): boolean => {
+    return appStore.state.error.visible;
+});
 
-        if (isBetaSatellite) {
-            this.$store.dispatch(APP_STATE_ACTIONS.SET_SATELLITE_STATUS, isBetaSatellite === 'true');
-        }
+/**
+ * Fixes the issue where view port height is taller than the visible viewport on
+ * mobile Safari/Webkit. See: https://bugs.webkit.org/show_bug.cgi?id=141832
+ * Specifically for us, this issue is seen in Safari and Google Chrome, both on iOS
+ */
+function fixViewportHeight(): void {
+    const agent = window.navigator.userAgent.toLowerCase();
+    const isMobile = screen.width <= 500;
+    const isIOS = agent.includes('applewebkit') && agent.includes('iphone');
+    // We don't want to apply this fix on FxIOS because it introduces strange behavior
+    // while not fixing the issue because it doesn't exist here.
+    const isFirefoxIOS = window.navigator.userAgent.toLowerCase().includes('fxios');
 
-        if (couponCodeBillingUIEnabled) {
-            this.$store.dispatch(APP_STATE_ACTIONS.SET_COUPON_CODE_BILLING_UI_STATUS, couponCodeBillingUIEnabled === 'true');
-        }
-
-        if (couponCodeSignupUIEnabled) {
-            this.$store.dispatch(APP_STATE_ACTIONS.SET_COUPON_CODE_SIGNUP_UI_STATUS, couponCodeSignupUIEnabled === 'true');
-        }
-
-        if (isNewProjectDashboard) {
-            this.$store.dispatch(APP_STATE_ACTIONS.SET_PROJECT_DASHBOARD_STATUS, isNewProjectDashboard === 'true');
-        }
-
-        this.fixViewportHeight();
-    }
-
-    public beforeDestroy(): void {
-        window.removeEventListener('resize', this.updateViewportVariable);
-    }
-
-    /**
-     * Fixes the issue where view port height is taller than the visible viewport on
-     * mobile Safari/Webkit. See: https://bugs.webkit.org/show_bug.cgi?id=141832
-     * Specifically for us, this issue is seen in Safari and Google Chrome, both on iOS
-     */
-    private fixViewportHeight(): void {
-        const agent = window.navigator.userAgent.toLowerCase();
-        const isMobile = screen.width <= 500;
-        const isIOS = agent.includes('applewebkit') && agent.includes('iphone');
-        // We don't want to apply this fix on FxIOS because it introduces strange behavior
-        // while not fixing the issue because it doesn't exist here.
-        const isFirefoxIOS = window.navigator.userAgent.toLowerCase().includes('fxios');
-
-        if (isMobile && isIOS && !isFirefoxIOS) {
-            // Set the custom --vh variable to the root of the document.
-            document.documentElement.style.setProperty('--vh', `${window.innerHeight}px`);
-            window.addEventListener('resize', this.updateViewportVariable);
-        }
-    }
-
-    /**
-     * Update the viewport height variable "--vh".
-     * This is called everytime there is a viewport change; e.g.: orientation change.
-     */
-    private updateViewportVariable(): void {
+    if (isMobile && isIOS && !isFirefoxIOS) {
+        // Set the custom --vh variable to the root of the document.
         document.documentElement.style.setProperty('--vh', `${window.innerHeight}px`);
+        window.addEventListener('resize', updateViewportVariable);
     }
 }
+
+/**
+ * Update the viewport height variable "--vh".
+ * This is called everytime there is a viewport change; e.g.: orientation change.
+ */
+function updateViewportVariable(): void {
+    document.documentElement.style.setProperty('--vh', `${window.innerHeight}px`);
+}
+
+/**
+ * Lifecycle hook after initial render.
+ * Sets up variables from meta tags from config such satellite name, etc.
+ */
+onMounted(async (): Promise<void> => {
+    try {
+        await configStore.getConfig();
+    } catch (error) {
+        appStore.setErrorPage(500, true);
+        notify.notifyError(error, null);
+    }
+
+    fixViewportHeight();
+
+    isLoading.value = false;
+});
+
+onBeforeUnmount((): void => {
+    window.removeEventListener('resize', updateViewportVariable);
+});
 </script>
 
 <style lang="scss">
@@ -145,9 +121,7 @@ export default class App extends Vue {
         font-display: swap;
         src:
             local(''),
-            url('../static/fonts/inter-v3-latin-regular.woff2') format('woff2'),
-            url('../static/fonts/inter-v3-latin-regular.woff') format('woff'),
-            url('../static/fonts/inter-v3-latin-regular.ttf') format('truetype');
+            url('@fontsource-variable/inter/files/inter-latin-standard-normal.woff2') format('woff2');
     }
 
     @font-face {
@@ -157,9 +131,7 @@ export default class App extends Vue {
         font-display: swap;
         src:
             local(''),
-            url('../static/fonts/inter-v3-latin-600.woff2') format('woff2'),
-            url('../static/fonts/inter-v3-latin-600.woff') format('woff'),
-            url('../static/fonts/inter-v3-latin-600.ttf') format('truetype');
+            url('@fontsource-variable/inter/files/inter-latin-standard-normal.woff2') format('woff2');
     }
 
     @font-face {
@@ -169,9 +141,7 @@ export default class App extends Vue {
         font-display: swap;
         src:
             local(''),
-            url('../static/fonts/inter-v3-latin-800.woff2') format('woff2'),
-            url('../static/fonts/inter-v3-latin-800.woff') format('woff'),
-            url('../static/fonts/inter-v3-latin-800.ttf') format('truetype');
+            url('@fontsource-variable/inter/files/inter-latin-standard-normal.woff2') format('woff2');
     }
 
     a {
@@ -190,6 +160,7 @@ export default class App extends Vue {
 
     ::-webkit-scrollbar {
         width: 4px;
+        height: 4px;
     }
 
     ::-webkit-scrollbar-track {
@@ -200,5 +171,9 @@ export default class App extends Vue {
         background: #afb7c1;
         border-radius: 6px;
         height: 5px;
+    }
+
+    ::-webkit-scrollbar-corner {
+        background-color: transparent;
     }
 </style>

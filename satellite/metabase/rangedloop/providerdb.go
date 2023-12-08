@@ -9,7 +9,6 @@ import (
 
 	"storj.io/common/uuid"
 	"storj.io/storj/satellite/metabase"
-	"storj.io/storj/satellite/metabase/segmentloop"
 )
 
 // MetabaseRangeSplitter implements RangeSplitter.
@@ -62,8 +61,13 @@ func (provider *MetabaseRangeSplitter) CreateRanges(nRanges int, batchSize int) 
 	return rangeProviders, err
 }
 
+// Range returns range which is processed by this provider.
+func (provider *MetabaseSegmentProvider) Range() UUIDRange {
+	return provider.uuidRange
+}
+
 // Iterate loops over a part of the segment table.
-func (provider *MetabaseSegmentProvider) Iterate(ctx context.Context, fn func([]segmentloop.Segment) error) error {
+func (provider *MetabaseSegmentProvider) Iterate(ctx context.Context, fn func([]Segment) error) error {
 	var startStreamID uuid.UUID
 	var endStreamID uuid.UUID
 
@@ -81,7 +85,7 @@ func (provider *MetabaseSegmentProvider) Iterate(ctx context.Context, fn func([]
 		StartStreamID:      startStreamID,
 		EndStreamID:        endStreamID,
 	}, func(ctx context.Context, iterator metabase.LoopSegmentsIterator) error {
-		segments := make([]segmentloop.Segment, 0, provider.batchSize)
+		segments := make([]Segment, 0, provider.batchSize)
 
 		segment := metabase.LoopSegmentEntry{}
 		for iterator.Next(ctx, &segment) {
@@ -90,7 +94,7 @@ func (provider *MetabaseSegmentProvider) Iterate(ctx context.Context, fn func([]
 				return err
 			}
 
-			segments = append(segments, segmentloop.Segment(segment))
+			segments = append(segments, Segment(segment))
 
 			if len(segments) >= provider.batchSize {
 				err = fn(segments)

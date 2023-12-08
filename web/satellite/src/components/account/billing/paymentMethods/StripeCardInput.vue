@@ -12,146 +12,139 @@
     </form>
 </template>
 
-<script lang="ts">
-import { Component, Prop, Vue } from 'vue-property-decorator';
+<script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { loadStripe } from '@stripe/stripe-js/pure';
+import {
+    Stripe,
+    StripeCardElement,
+    StripeCardElementChangeEvent,
+    TokenResult,
+} from '@stripe/stripe-js';
 
-import { MetaUtils } from '@/utils/meta';
-import { LoadScript } from '@/utils/loadScript';
 import { AnalyticsErrorEventSource } from '@/utils/constants/analyticsEventNames';
+import { useNotify } from '@/utils/hooks';
+import { useConfigStore } from '@/store/modules/configStore';
 
-interface StripeResponse {
-    error: string
-    token: {
-        id: unknown
-        card: {
-            funding : string
-        }
+const configStore = useConfigStore();
+const notify = useNotify();
+
+const props = withDefaults(defineProps<{
+    onStripeResponseCallback: (tokenId: unknown) => Promise<void>,
+}>(), {
+    onStripeResponseCallback: () => Promise.reject('onStripeResponse is not reinitialized'),
+});
+
+const isLoading = ref<boolean>(false);
+/**
+ * Stripe elements is used to create 'Add Card' form.
+ */
+const cardElement = ref<StripeCardElement>();
+/**
+ * Stripe library.
+ */
+const stripe = ref<Stripe | null>(null);
+
+/**
+ * Stripe initialization.
+ */
+async function initStripe(): Promise<void> {
+    const stripePublicKey = configStore.state.config.stripePublicKey;
+
+    try {
+        stripe.value = await loadStripe(stripePublicKey);
+    } catch (error) {
+        notify.error(error.message, AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
+        return;
     }
+
+    if (!stripe.value) {
+        notify.error('Unable to initialize stripe', AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
+        return;
+    }
+
+    const elements = stripe.value?.elements();
+    if (!elements) {
+        notify.error('Unable to instantiate elements', AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
+        return;
+    }
+
+    cardElement.value = elements.create('card');
+    if (!cardElement.value) {
+        notify.error('Unable to create card element', AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
+        return;
+    }
+
+    cardElement.value?.mount('#card-element');
+    cardElement.value?.on('change', (event: StripeCardElementChangeEvent) => {
+        const displayError: HTMLElement = document.getElementById('card-errors') as HTMLElement;
+        if (event.error) {
+            displayError.textContent = event.error.message;
+        } else {
+            displayError.textContent = '';
+        }
+    });
 }
 
-// StripeCardInput encapsulates Stripe add card addition logic
-// @vue/component
-@Component
-export default class StripeCardInput extends Vue {
-    @Prop({ default: () => () => console.error('onStripeResponse is not reinitialized') })
-    private readonly onStripeResponseCallback: (tokenId: unknown) => void;
-
-    private isLoading = false;
-
-    /**
-     * Stripe elements is using to create 'Add Card' form.
-     */
-    private cardElement: any; // eslint-disable-line @typescript-eslint/no-explicit-any
-
-    /**
-     * Stripe library.
-     */
-    private stripe: any; // eslint-disable-line @typescript-eslint/no-explicit-any
-
-    /**
-     * Stripe initialization.
-     */
-    private async initStripe() {
-        const stripePublicKey = MetaUtils.getMetaContent('stripe-public-key');
-
-        this.stripe = window['Stripe'](stripePublicKey);
-
-        if (!this.stripe) {
-            await this.$notify.error('Unable to initialize stripe', AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
-
-            return;
-        }
-
-        const elements = this.stripe.elements();
-
-        if (!elements) {
-            await this.$notify.error('Unable to instantiate elements', AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
-
-            return;
-        }
-
-        this.cardElement = elements.create('card');
-
-        if (!this.cardElement) {
-            await this.$notify.error('Unable to create card', AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
-
-            return;
-        }
-
-        this.cardElement.mount('#card-element');
-        this.cardElement.addEventListener('change', function (event): void {
-            const displayError: HTMLElement = document.getElementById('card-errors') as HTMLElement;
-            if (event.error) {
-                displayError.textContent = event.error.message;
-            } else {
-                displayError.textContent = '';
-            }
-        });
+/**
+ * Event after card adding.
+ * Returns token to callback and clears card input
+ *
+ * @param result stripe response
+ */
+async function onStripeResponse(result: TokenResult): Promise<void> {
+    if (result.error) {
+        throw result.error;
     }
 
-    /**
-     * Stripe library loading and initialization.
-     */
-    public async mounted(): Promise<void> {
-        if (!window['Stripe']) {
-            const script = new LoadScript('https://js.stripe.com/v3/',
-                () => { this.initStripe(); },
-                () => { this.$notify.error('Stripe library not loaded', AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
-                    script.remove();
-                },
-            );
-
-            return;
-        }
-
-        this.initStripe();
+    if (result.token.card?.funding === 'prepaid') {
+        notify.error('Prepaid cards are not supported', AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
+        return;
     }
 
-    /**
-     * Event after card adding.
-     * Returns token to callback and clears card input
-     *
-     * @param result stripe response
-     */
-    public async onStripeResponse(result: StripeResponse): Promise<void> {
-        if (result.error) {
-            throw result.error;
-        }
-
-        if (result.token.card.funding === 'prepaid') {
-            await this.$notify.error('Prepaid cards are not supported', AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
-
-            return;
-        }
-
-        await this.onStripeResponseCallback(result.token.id);
-        this.cardElement.clear();
-    }
-
-    /**
-     * Clears listeners.
-     */
-    public beforeDestroy(): void {
-        this.cardElement?.removeEventListener('change');
-    }
-
-    /**
-     * Fires stripe event after all inputs are filled.
-     */
-    public async onSubmit(): Promise<void> {
-        if (this.isLoading) return;
-
-        this.isLoading = true;
-
-        try {
-            await this.stripe.createToken(this.cardElement).then(this.onStripeResponse);
-        } catch (error) {
-            await this.$notify.error(error.message, AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
-        }
-
-        this.isLoading = false;
-    }
+    await props.onStripeResponseCallback(result.token.id);
+    cardElement.value?.clear();
 }
+
+/**
+ * Fires stripe event after all inputs are filled.
+ */
+async function onSubmit(): Promise<void> {
+    if (!(stripe.value && cardElement.value)) {
+        notify.error('Stripe is not initialized', AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
+        return;
+    }
+
+    if (isLoading.value) return;
+
+    isLoading.value = true;
+
+    try {
+        await stripe.value.createToken(cardElement.value).then(onStripeResponse);
+    } catch (error) {
+        notify.error(error.message, AnalyticsErrorEventSource.BILLING_STRIPE_CARD_INPUT);
+    }
+
+    isLoading.value = false;
+}
+
+/**
+ * Stripe library loading and initialization.
+ */
+onMounted(() => {
+    initStripe();
+});
+
+/**
+ * Clears listeners.
+ */
+onBeforeUnmount(() => {
+    cardElement.value?.off('change');
+});
+
+defineExpose({
+    onSubmit,
+});
 </script>
 
 <style scoped lang="scss">
@@ -159,15 +152,10 @@ export default class StripeCardInput extends Vue {
         box-sizing: border-box;
         width: 100%;
         padding: 13px 12px;
-        border: 1px solid transparent;
+        border: 1px solid var(--c-grey-2);
         border-radius: 4px;
         background-color: white;
-        box-shadow: 0 1px 3px 0 #e6ebf1;
-        transition: box-shadow 150ms ease;
-    }
-
-    .StripeElement--focus {
-        box-shadow: 0 1px 3px 0 #cfd7df;
+        box-shadow: 0 2px 5px 0 rgb(50 50 93 / 7%);
     }
 
     .StripeElement--invalid {
@@ -180,5 +168,11 @@ export default class StripeCardInput extends Vue {
 
     .form-row {
         width: 100%;
+    }
+
+    #card-errors {
+        text-align: left;
+        font-family: 'font-medium', sans-serif;
+        color: var(--c-red-2);
     }
 </style>

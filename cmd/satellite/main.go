@@ -21,7 +21,6 @@ import (
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 
-	"storj.io/common/context2"
 	"storj.io/common/fpath"
 	"storj.io/common/lrucache"
 	"storj.io/common/pb"
@@ -41,9 +40,8 @@ import (
 	"storj.io/storj/satellite/accounting/live"
 	"storj.io/storj/satellite/compensation"
 	"storj.io/storj/satellite/metabase"
-	"storj.io/storj/satellite/orders"
-	"storj.io/storj/satellite/overlay"
-	"storj.io/storj/satellite/payments/stripecoinpayments"
+	"storj.io/storj/satellite/nodeselection"
+	"storj.io/storj/satellite/payments/stripe"
 	"storj.io/storj/satellite/satellitedb"
 )
 
@@ -54,7 +52,7 @@ type Satellite struct {
 	DatabaseOptions struct {
 		APIKeysCache struct {
 			Expiration time.Duration `help:"satellite database api key expiration" default:"60s"`
-			Capacity   int           `help:"satellite database api key lru capacity" default:"1000"`
+			Capacity   int           `help:"satellite database api key lru capacity" default:"10000"`
 		}
 		RevocationsCache struct {
 			Expiration time.Duration `help:"macaroon revocation cache expiration" default:"5m"`
@@ -101,6 +99,11 @@ var (
 		Use:   "api",
 		Short: "Run the satellite API",
 		RunE:  cmdAPIRun,
+	}
+	runUICmd = &cobra.Command{
+		Use:   "ui",
+		Short: "Run the satellite UI",
+		RunE:  cmdUIRun,
 	}
 	runRepairerCmd = &cobra.Command{
 		Use:   "repair",
@@ -210,6 +213,22 @@ var (
 		Long:  "Applies free tier coupon to Stripe customers without a coupon",
 		RunE:  cmdApplyFreeTierCoupons,
 	}
+	setInvoiceStatusCmd = &cobra.Command{
+		Use:   "set-invoice-status [start-period] [end-period] [status]",
+		Short: "set all open invoices status",
+		Long:  "set all open invoices in the specified date ranges to the provided status. Period is a UTC date formatted like YYYY-MM.",
+		Args:  cobra.ExactArgs(3),
+		RunE:  cmdSetInvoiceStatus,
+	}
+	createCustomerBalanceInvoiceItemsCmd = &cobra.Command{
+		Use:   "create-balance-invoice-items",
+		Short: "Creates stripe invoice line items for stripe customer balance",
+		Long:  "Creates stripe invoice line items for stripe customer balances obtained from past invoices and other miscellaneous charges.",
+		RunE:  cmdCreateCustomerBalanceInvoiceItems,
+	}
+
+	aggregate = false
+
 	prepareCustomerInvoiceRecordsCmd = &cobra.Command{
 		Use:   "prepare-invoice-records [period]",
 		Short: "Prepares invoice project records",
@@ -223,6 +242,13 @@ var (
 		Long:  "Creates stripe invoice line items for not consumed project records.",
 		Args:  cobra.ExactArgs(1),
 		RunE:  cmdCreateCustomerProjectInvoiceItems,
+	}
+	createCustomerAggregatedProjectInvoiceItemsCmd = &cobra.Command{
+		Use:   "create-aggregated-project-invoice-items [period]",
+		Short: "Creates aggregated stripe invoice line items for project charges",
+		Long:  "Creates aggregated stripe invoice line items for not consumed project records.",
+		Args:  cobra.ExactArgs(1),
+		RunE:  cmdCreateAggregatedCustomerProjectInvoiceItems,
 	}
 	createCustomerInvoicesCmd = &cobra.Command{
 		Use:   "create-invoices [period]",
@@ -244,12 +270,33 @@ var (
 		Long:  "Finalizes all draft stripe invoices known to satellite's stripe account.",
 		RunE:  cmdFinalizeCustomerInvoices,
 	}
-	payCustomerInvoicesCmd = &cobra.Command{
+	payInvoicesWithTokenCmd = &cobra.Command{
+		Use:   "pay-customer-invoices",
+		Short: "pay open finalized invoices for customer",
+		Long:  "attempts payment on any open finalized invoices for a specific user.",
+		Args:  cobra.ExactArgs(1),
+		RunE:  cmdPayCustomerInvoices,
+	}
+	payAllInvoicesCmd = &cobra.Command{
 		Use:   "pay-invoices",
 		Short: "pay finalized invoices",
 		Long:  "attempts payment on all open finalized invoices according to subscriptions settings.",
 		Args:  cobra.ExactArgs(1),
-		RunE:  cmdPayCustomerInvoices,
+		RunE:  cmdPayAllInvoices,
+	}
+	failPendingInvoiceTokenPaymentCmd = &cobra.Command{
+		Use:   "fail-token-payment",
+		Short: "fail pending invoice token payment",
+		Long:  "attempts to transition the token invoice payments that are stuck in a pending state to failed.",
+		Args:  cobra.ExactArgs(1),
+		RunE:  cmdFailPendingInvoiceTokenPayments,
+	}
+	completePendingInvoiceTokenPaymentCmd = &cobra.Command{
+		Use:   "complete-token-payment",
+		Short: "complete pending invoice token payment",
+		Long:  "attempts to transition the token invoice payments that are stuck in a pending state to complete.",
+		Args:  cobra.ExactArgs(1),
+		RunE:  cmdCompletePendingInvoiceTokenPayments,
 	}
 	stripeCustomerCmd = &cobra.Command{
 		Use:   "ensure-stripe-customer",
@@ -294,6 +341,11 @@ var (
 		Args:  cobra.RangeArgs(1, 2),
 		RunE:  cmdRepairSegment,
 	}
+	fixLastNetsCmd = &cobra.Command{
+		Use:   "fix-last-nets",
+		Short: "Fix last_net entries in the database for satellites with DistinctIP=false",
+		RunE:  cmdFixLastNets,
+	}
 
 	runCfg   Satellite
 	setupCfg Satellite
@@ -326,12 +378,16 @@ var (
 		Database  string `help:"satellite database connection string" releaseDefault:"postgres://" devDefault:"postgres://"`
 		Output    string `help:"destination of report output" default:""`
 		Completed bool   `help:"whether to output (initiated and completed) or (initiated and not completed)" default:"false"`
+		TimeBased bool   `help:"whether the satellite is using time-based graceful exit (and thus, whether to include piece transfer progress in output)" default:"false"`
 	}
 	reportsVerifyGracefulExitReceiptCfg struct {
 	}
 	consistencyGECleanupCfg struct {
 		Database string `help:"satellite database connection string" releaseDefault:"postgres://" devDefault:"postgres://"`
 		Before   string `help:"select only exited nodes before this UTC date formatted like YYYY-MM. Date cannot be newer than the current time (required)"`
+	}
+	setInvoiceStatusCfg struct {
+		DryRun bool `help:"do not update stripe" default:"false"`
 	}
 
 	confDir     string
@@ -347,6 +403,7 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 	runCmd.AddCommand(runMigrationCmd)
 	runCmd.AddCommand(runAPICmd)
+	runCmd.AddCommand(runUICmd)
 	runCmd.AddCommand(runAdminCmd)
 	runCmd.AddCommand(runRepairerCmd)
 	runCmd.AddCommand(runAuditorCmd)
@@ -363,6 +420,7 @@ func init() {
 	rootCmd.AddCommand(registerLostSegments)
 	rootCmd.AddCommand(fetchPiecesCmd)
 	rootCmd.AddCommand(repairSegmentCmd)
+	rootCmd.AddCommand(fixLastNetsCmd)
 	reportsCmd.AddCommand(nodeUsageCmd)
 	reportsCmd.AddCommand(partnerAttributionCmd)
 	reportsCmd.AddCommand(reportsGracefulExitCmd)
@@ -371,17 +429,26 @@ func init() {
 	compensationCmd.AddCommand(recordPeriodCmd)
 	compensationCmd.AddCommand(recordOneOffPaymentsCmd)
 	billingCmd.AddCommand(applyFreeTierCouponsCmd)
+	billingCmd.AddCommand(setInvoiceStatusCmd)
+	billingCmd.AddCommand(createCustomerBalanceInvoiceItemsCmd)
 	billingCmd.AddCommand(prepareCustomerInvoiceRecordsCmd)
+	prepareCustomerInvoiceRecordsCmd.Flags().BoolVar(&aggregate, "aggregate", false, "Used to enable creation of to be aggregated project records in case users have many projects (more than 83).")
 	billingCmd.AddCommand(createCustomerProjectInvoiceItemsCmd)
+	billingCmd.AddCommand(createCustomerAggregatedProjectInvoiceItemsCmd)
 	billingCmd.AddCommand(createCustomerInvoicesCmd)
 	billingCmd.AddCommand(generateCustomerInvoicesCmd)
+	generateCustomerInvoicesCmd.Flags().BoolVar(&aggregate, "aggregate", false, "Used to enable invoice items aggregation in case users have many projects (more than 83).")
 	billingCmd.AddCommand(finalizeCustomerInvoicesCmd)
-	billingCmd.AddCommand(payCustomerInvoicesCmd)
+	billingCmd.AddCommand(payInvoicesWithTokenCmd)
+	billingCmd.AddCommand(payAllInvoicesCmd)
+	billingCmd.AddCommand(failPendingInvoiceTokenPaymentCmd)
+	billingCmd.AddCommand(completePendingInvoiceTokenPaymentCmd)
 	billingCmd.AddCommand(stripeCustomerCmd)
 	consistencyCmd.AddCommand(consistencyGECleanupCmd)
 	process.Bind(runCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(runMigrationCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(runAPICmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
+	process.Bind(runUICmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(runAdminCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(runRepairerCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(runAuditorCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
@@ -402,14 +469,22 @@ func init() {
 	process.Bind(reportsVerifyGEReceiptCmd, &reportsVerifyGracefulExitReceiptCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(partnerAttributionCmd, &partnerAttribtionCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(applyFreeTierCouponsCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
+	process.Bind(setInvoiceStatusCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
+	process.Bind(setInvoiceStatusCmd, &setInvoiceStatusCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
+	process.Bind(createCustomerBalanceInvoiceItemsCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(prepareCustomerInvoiceRecordsCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(createCustomerProjectInvoiceItemsCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
+	process.Bind(createCustomerAggregatedProjectInvoiceItemsCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(createCustomerInvoicesCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(generateCustomerInvoicesCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(finalizeCustomerInvoicesCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
-	process.Bind(payCustomerInvoicesCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
+	process.Bind(payInvoicesWithTokenCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
+	process.Bind(payAllInvoicesCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
+	process.Bind(failPendingInvoiceTokenPaymentCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
+	process.Bind(completePendingInvoiceTokenPaymentCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(stripeCustomerCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 	process.Bind(consistencyGECleanupCmd, &consistencyGECleanupCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
+	process.Bind(fixLastNetsCmd, &runCfg, defaults, cfgstruct.ConfDir(confDir), cfgstruct.IdentityDir(identityDir))
 
 	if err := consistencyGECleanupCmd.MarkFlagRequired("before"); err != nil {
 		panic(err)
@@ -421,8 +496,6 @@ func cmdRun(cmd *cobra.Command, args []string) (err error) {
 
 	ctx, _ := process.Ctx(cmd)
 	log := zap.L()
-
-	runCfg.Debug.Address = *process.DebugAddrFlag
 
 	identity, err := runCfg.Identity.Load()
 	if err != nil {
@@ -473,12 +546,7 @@ func cmdRun(cmd *cobra.Command, args []string) (err error) {
 		err = errs.Combine(err, liveAccounting.Close())
 	}()
 
-	rollupsWriteCache := orders.NewRollupsWriteCache(log.Named("orders-write-cache"), db.Orders(), runCfg.Orders.FlushBatchSize)
-	defer func() {
-		err = errs.Combine(err, rollupsWriteCache.CloseAndFlush(context2.WithoutCancellation(ctx)))
-	}()
-
-	peer, err := satellite.New(log, identity, db, metabaseDB, revocationDB, liveAccounting, rollupsWriteCache, version.Build, &runCfg.Config, process.AtomicLevel(cmd))
+	peer, err := satellite.New(log, identity, db, metabaseDB, revocationDB, liveAccounting, version.Build, &runCfg.Config, process.AtomicLevel(cmd))
 	if err != nil {
 		return err
 	}
@@ -623,7 +691,7 @@ func cmdReportsGracefulExit(cmd *cobra.Command, args []string) (err error) {
 
 	// send output to stdout
 	if reportsGracefulExitCfg.Output == "" {
-		return generateGracefulExitCSV(ctx, reportsGracefulExitCfg.Completed, start, end, os.Stdout)
+		return generateGracefulExitCSV(ctx, reportsGracefulExitCfg.TimeBased, reportsGracefulExitCfg.Completed, start, end, os.Stdout)
 	}
 
 	// send output to file
@@ -636,7 +704,7 @@ func cmdReportsGracefulExit(cmd *cobra.Command, args []string) (err error) {
 		err = errs.Combine(err, file.Close())
 	}()
 
-	return generateGracefulExitCSV(ctx, reportsGracefulExitCfg.Completed, start, end, file)
+	return generateGracefulExitCSV(ctx, reportsGracefulExitCfg.TimeBased, reportsGracefulExitCfg.Completed, start, end, file)
 }
 
 func cmdNodeUsage(cmd *cobra.Command, args []string) (err error) {
@@ -746,6 +814,38 @@ func cmdValueAttribution(cmd *cobra.Command, args []string) (err error) {
 	return reports.GenerateAttributionCSV(ctx, partnerAttribtionCfg.Database, start, end, userAgents, file)
 }
 
+// cmdSetInvoiceStatus sets the status of all open invoices within the provided period to the provided status.
+// args[0] is the start of the period in YYYY-MM format.
+// args[1] is the end of the period in YYYY-MM format.
+// args[2] is the status to set the invoices to.
+func cmdSetInvoiceStatus(cmd *cobra.Command, args []string) (err error) {
+	ctx, _ := process.Ctx(cmd)
+
+	periodStart, err := parseYearMonth(args[0])
+	if err != nil {
+		return err
+	}
+
+	periodEnd, err := parseYearMonth(args[1])
+	if err != nil {
+		return err
+	}
+	// parseYearMonth returns the first day of the month, but we want the period end to be the last day of the month
+	periodEnd = periodEnd.AddDate(0, 1, -1)
+
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
+		return payments.SetInvoiceStatus(ctx, periodStart, periodEnd, args[2], setInvoiceStatusCfg.DryRun)
+	})
+}
+
+func cmdCreateCustomerBalanceInvoiceItems(cmd *cobra.Command, _ []string) (err error) {
+	ctx, _ := process.Ctx(cmd)
+
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
+		return payments.CreateBalanceInvoiceItems(ctx)
+	})
+}
+
 func cmdPrepareCustomerInvoiceRecords(cmd *cobra.Command, args []string) (err error) {
 	ctx, _ := process.Ctx(cmd)
 
@@ -754,8 +854,8 @@ func cmdPrepareCustomerInvoiceRecords(cmd *cobra.Command, args []string) (err er
 		return err
 	}
 
-	return runBillingCmd(ctx, func(ctx context.Context, payments *stripecoinpayments.Service, _ satellite.DB) error {
-		return payments.PrepareInvoiceProjectRecords(ctx, periodStart)
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
+		return payments.PrepareInvoiceProjectRecords(ctx, periodStart, aggregate)
 	})
 }
 
@@ -767,8 +867,21 @@ func cmdCreateCustomerProjectInvoiceItems(cmd *cobra.Command, args []string) (er
 		return err
 	}
 
-	return runBillingCmd(ctx, func(ctx context.Context, payments *stripecoinpayments.Service, _ satellite.DB) error {
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
 		return payments.InvoiceApplyProjectRecords(ctx, periodStart)
+	})
+}
+
+func cmdCreateAggregatedCustomerProjectInvoiceItems(cmd *cobra.Command, args []string) (err error) {
+	ctx, _ := process.Ctx(cmd)
+
+	periodStart, err := parseYearMonth(args[0])
+	if err != nil {
+		return err
+	}
+
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
+		return payments.InvoiceApplyToBeAggregatedProjectRecords(ctx, periodStart)
 	})
 }
 
@@ -780,7 +893,7 @@ func cmdCreateCustomerInvoices(cmd *cobra.Command, args []string) (err error) {
 		return err
 	}
 
-	return runBillingCmd(ctx, func(ctx context.Context, payments *stripecoinpayments.Service, _ satellite.DB) error {
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
 		return payments.CreateInvoices(ctx, periodStart)
 	})
 }
@@ -793,15 +906,15 @@ func cmdGenerateCustomerInvoices(cmd *cobra.Command, args []string) (err error) 
 		return err
 	}
 
-	return runBillingCmd(ctx, func(ctx context.Context, payments *stripecoinpayments.Service, _ satellite.DB) error {
-		return payments.GenerateInvoices(ctx, periodStart)
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
+		return payments.GenerateInvoices(ctx, periodStart, aggregate)
 	})
 }
 
 func cmdFinalizeCustomerInvoices(cmd *cobra.Command, args []string) (err error) {
 	ctx, _ := process.Ctx(cmd)
 
-	return runBillingCmd(ctx, func(ctx context.Context, payments *stripecoinpayments.Service, _ satellite.DB) error {
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
 		return payments.FinalizeInvoices(ctx)
 	})
 }
@@ -809,17 +922,43 @@ func cmdFinalizeCustomerInvoices(cmd *cobra.Command, args []string) (err error) 
 func cmdPayCustomerInvoices(cmd *cobra.Command, args []string) (err error) {
 	ctx, _ := process.Ctx(cmd)
 
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
+		err := payments.InvoiceApplyCustomerTokenBalance(ctx, args[0])
+		if err != nil {
+			return errs.New("error applying native token payments to invoice for customer: %v", err)
+		}
+		return payments.PayCustomerInvoices(ctx, args[0])
+	})
+}
+
+func cmdPayAllInvoices(cmd *cobra.Command, args []string) (err error) {
+	ctx, _ := process.Ctx(cmd)
+
 	periodStart, err := parseYearMonth(args[0])
 	if err != nil {
 		return err
 	}
 
-	return runBillingCmd(ctx, func(ctx context.Context, payments *stripecoinpayments.Service, _ satellite.DB) error {
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
 		err := payments.InvoiceApplyTokenBalance(ctx, periodStart)
 		if err != nil {
 			return errs.New("error applying native token payments: %v", err)
 		}
 		return payments.PayInvoices(ctx, periodStart)
+	})
+}
+
+func cmdFailPendingInvoiceTokenPayments(cmd *cobra.Command, args []string) (err error) {
+	ctx, _ := process.Ctx(cmd)
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
+		return payments.FailPendingInvoiceTokenPayments(ctx, strings.Split(args[0], ","))
+	})
+}
+
+func cmdCompletePendingInvoiceTokenPayments(cmd *cobra.Command, args []string) (err error) {
+	ctx, _ := process.Ctx(cmd)
+	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
+		return payments.CompletePendingInvoiceTokenPayments(ctx, strings.Split(args[0], ","))
 	})
 }
 
@@ -832,6 +971,9 @@ func cmdStripeCustomer(cmd *cobra.Command, args []string) (err error) {
 func cmdConsistencyGECleanup(cmd *cobra.Command, args []string) error {
 	ctx, _ := process.Ctx(cmd)
 
+	if runCfg.GracefulExit.TimeBased {
+		return errs.New("this command is not supported with time-based graceful exit")
+	}
 	before, err := time.Parse("2006-01-02", consistencyGECleanupCfg.Before)
 	if err != nil {
 		return errs.New("before flag value isn't of the expected format. %+v", err)
@@ -879,8 +1021,11 @@ func cmdRestoreTrash(cmd *cobra.Command, args []string) error {
 	successes := new(int64)
 	failures := new(int64)
 
-	undelete := func(node *overlay.SelectedNode) {
+	undelete := func(node *nodeselection.SelectedNode) {
 		log.Info("starting restore trash", zap.String("Node ID", node.ID.String()))
+
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
 
 		conn, err := dialer.DialNodeURL(ctx, storj.NodeURL{
 			ID:      node.ID,
@@ -910,9 +1055,9 @@ func cmdRestoreTrash(cmd *cobra.Command, args []string) error {
 		log.Info("successful restore trash", zap.String("Node ID", node.ID.String()))
 	}
 
-	var nodes []*overlay.SelectedNode
+	var nodes []*nodeselection.SelectedNode
 	if len(args) == 0 {
-		err = db.OverlayCache().IterateAllContactedNodes(ctx, func(ctx context.Context, node *overlay.SelectedNode) error {
+		err = db.OverlayCache().IterateAllContactedNodes(ctx, func(ctx context.Context, node *nodeselection.SelectedNode) error {
 			nodes = append(nodes, node)
 			return nil
 		})
@@ -929,7 +1074,7 @@ func cmdRestoreTrash(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				return err
 			}
-			nodes = append(nodes, &overlay.SelectedNode{
+			nodes = append(nodes, &nodeselection.SelectedNode{
 				ID:         dossier.Id,
 				Address:    dossier.Address,
 				LastNet:    dossier.LastNet,
@@ -977,6 +1122,27 @@ func cmdRegisterLostSegments(cmd *cobra.Command, args []string) error {
 	log.Info("lost segment event(s) sent (if metrics are actually enabled)", zap.Int("lost-segments", numLostSegments))
 
 	return nil
+}
+
+func cmdFixLastNets(cmd *cobra.Command, _ []string) (err error) {
+	ctx, _ := process.Ctx(cmd)
+	log := zap.L()
+
+	if runCfg.Overlay.Node.DistinctIP {
+		log.Info("No fix necessary; DistinctIP=true")
+		return nil
+	}
+	db, err := satellitedb.Open(ctx, log.Named("db"), runCfg.Database, satellitedb.Options{
+		ApplicationName: "satellite-fix-last-nets",
+	})
+	if err != nil {
+		return fmt.Errorf("error opening master database: %w", err)
+	}
+	defer func() {
+		err = errs.Combine(err, db.Close())
+	}()
+
+	return db.OverlayCache().OneTimeFixLastNets(ctx)
 }
 
 func main() {

@@ -24,27 +24,20 @@
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Prop, Vue } from 'vue-property-decorator';
-
+<script setup lang="ts">
 import VButton from '@/components/common/VButton.vue';
 
-// @vue/component
-@Component({
-    components: {
-        VButton,
-    },
-})
-export default class CLIFlowContainer extends Vue {
-    @Prop({ default: () => () => {} })
-    public readonly onNextClick: () => unknown;
-    @Prop({ default: () => () => {} })
-    public readonly onBackClick: () => unknown;
-    @Prop({ default: '' })
-    public readonly title: string;
-    @Prop({ default: false })
-    public readonly isLoading: boolean;
-}
+const props = withDefaults(defineProps<{
+    onNextClick: () => unknown;
+    onBackClick: () => unknown;
+    title: string;
+    isLoading?: boolean;
+}>(), {
+    onNextClick: () => {},
+    onBackClick: () => {},
+    title: '',
+    isLoading: false,
+});
 </script>
 
 <style scoped lang="scss">
@@ -58,6 +51,10 @@ export default class CLIFlowContainer extends Vue {
         display: flex;
         flex-direction: column;
         align-items: center;
+
+        @media screen and (width <= 600px) {
+            padding: 24px;
+        }
 
         &__title {
             margin: 20px 0;
@@ -74,6 +71,12 @@ export default class CLIFlowContainer extends Vue {
             width: 100%;
             margin-top: 34px;
             column-gap: 24px;
+
+            @media screen and (width <= 450px) {
+                flex-direction: column-reverse;
+                column-gap: unset;
+                row-gap: 24px;
+            }
         }
     }
 </style>

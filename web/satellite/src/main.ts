@@ -1,31 +1,25 @@
 // Copyright (C) 2019 Storj Labs, Inc.
 // See LICENSE for copying information.
 
-import Vue from 'vue';
-import VueClipboard from 'vue-clipboard2';
-import VueSanitize from 'vue-sanitize';
-import { createPinia, PiniaVuePlugin } from 'pinia';
+import { createApp } from 'vue';
+import { createPinia, setActivePinia } from 'pinia';
+import Papa from 'papaparse';
+import PAPA_PARSE_WORKER_URL from 'virtual:papa-parse-worker';
 
 import App from './App.vue';
 import { router } from './router';
-import { store } from './store';
 
-import { Size } from '@/utils/bytesSize';
-import { NotificatorPlugin } from '@/utils/plugins/notificator';
+import NotificatorPlugin from '@/utils/plugins/notificator';
 
-window['VueNextTick'] = function(callback) {
-    return Vue.nextTick(callback);
-};
-
-Vue.config.devtools = true;
-Vue.config.performance = true;
-Vue.config.productionTip = false;
-
-Vue.use(new NotificatorPlugin(store));
-Vue.use(VueClipboard);
-Vue.use(VueSanitize);
-Vue.use(PiniaVuePlugin);
 const pinia = createPinia();
+setActivePinia(pinia);
+
+const app = createApp(App);
+app.config.performance = true;
+
+app.use(NotificatorPlugin);
+app.use(pinia);
+app.use(router);
 
 /**
  * Click outside handlers.
@@ -40,8 +34,8 @@ document.addEventListener('click', event => {
 /**
  * Binds closing action to outside popups area.
  */
-Vue.directive('click-outside', {
-    bind(el, binding) {
+app.directive('click-outside', {
+    mounted(el, binding) {
         const handler = event => {
             if (el !== event.target && !el.contains(event.target)) {
                 binding.value(event);
@@ -51,16 +45,16 @@ Vue.directive('click-outside', {
         handlers.set(el, handler);
     },
 
-    unbind(el) {
+    unmounted(el) {
         handlers.delete(el);
     },
 });
 
 /**
- * number directive allow user to type only numbers in input.
+ * Number directive allow user to type only numbers in input.
  */
-Vue.directive('number', {
-    bind (el: HTMLElement) {
+app.directive('number', {
+    mounted (el: HTMLElement) {
         el.addEventListener('keydown', (e: KeyboardEvent) => {
             const keyCode = parseInt(e.key);
 
@@ -73,30 +67,8 @@ Vue.directive('number', {
     },
 });
 
-/**
- * centsToDollars is a Vue filter that converts amount of cents in dollars string.
- */
-Vue.filter('centsToDollars', (cents: number): string => {
-    return `$${(cents / 100).toFixed(2)}`;
-});
+app.mount('#app');
 
-/**
- * Converts bytes to base-10 types.
- */
-Vue.filter('bytesToBase10String', (amountInBytes: number): string => {
-    return `${Size.toBase10String(amountInBytes)}`;
-});
-
-/**
- * Adds leading zero to number if it is less than 10.
- */
-Vue.filter('leadingZero', (value: number): string => {
-    return value <= 9 ? `0${value}` : `${value}`;
-});
-
-new Vue({
-    router,
-    store,
-    pinia,
-    render: (h) => h(App),
-}).$mount('#app');
+// By default, Papa Parse uses a blob URL for loading its worker.
+// This isn't supported by our content security policy, so we override the URL.
+Object.assign(Papa, { BLOB_URL: PAPA_PARSE_WORKER_URL });

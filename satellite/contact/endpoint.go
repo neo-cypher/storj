@@ -14,11 +14,11 @@ import (
 
 	"storj.io/common/identity"
 	"storj.io/common/pb"
+	"storj.io/common/rpc/noise"
 	"storj.io/common/rpc/rpcstatus"
 	"storj.io/common/storj"
 	"storj.io/drpc/drpcctx"
 	"storj.io/storj/private/nodeoperator"
-	"storj.io/storj/private/server"
 	"storj.io/storj/satellite/overlay"
 )
 
@@ -61,7 +61,7 @@ func (endpoint *Endpoint) CheckIn(ctx context.Context, req *pb.CheckInRequest) (
 
 	// we need a string as a key for the limiter, but nodeID.String() has base58 encoding overhead
 	nodeIDBytesAsString := string(nodeID.Bytes())
-	if !endpoint.service.idLimiter.IsAllowed(nodeIDBytesAsString) {
+	if !endpoint.service.idLimiter.IsAllowed(ctx, nodeIDBytesAsString) {
 		endpoint.log.Info("node rate limited by id", zap.String("node address", req.Address), zap.Stringer("Node ID", nodeID))
 		return nil, rpcstatus.Error(rpcstatus.ResourceExhausted, errCheckInRateLimit.New("node rate limited by id").Error())
 	}
@@ -72,7 +72,7 @@ func (endpoint *Endpoint) CheckIn(ctx context.Context, req *pb.CheckInRequest) (
 		return nil, rpcstatus.Error(rpcstatus.FailedPrecondition, errCheckInIdentity.New("failed to add peer identity entry for ID: %v", err).Error())
 	}
 
-	resolvedIP, port, resolvedNetwork, err := overlay.ResolveIPAndNetwork(ctx, req.Address)
+	resolvedIP, port, resolvedNetwork, err := endpoint.service.overlay.ResolveIPAndNetwork(ctx, req.Address)
 	if err != nil {
 		endpoint.log.Info("failed to resolve IP from address", zap.String("node address", req.Address), zap.Stringer("Node ID", nodeID), zap.Error(err))
 		return nil, rpcstatus.Error(rpcstatus.InvalidArgument, errCheckInNetwork.New("failed to resolve IP from address: %s, err: %v", req.Address, err).Error())
@@ -89,7 +89,7 @@ func (endpoint *Endpoint) CheckIn(ctx context.Context, req *pb.CheckInRequest) (
 
 	var noiseInfo *pb.NoiseInfo
 	if req.NoiseKeyAttestation != nil {
-		if err := server.ValidateNoiseKeyAttestation(ctx, req.NoiseKeyAttestation); err == nil {
+		if err := noise.ValidateKeyAttestation(ctx, req.NoiseKeyAttestation, nodeID); err == nil {
 			noiseInfo = &pb.NoiseInfo{
 				Proto:     req.NoiseKeyAttestation.NoiseProto,
 				PublicKey: req.NoiseKeyAttestation.NoisePublicKey,
@@ -114,12 +114,18 @@ func (endpoint *Endpoint) CheckIn(ctx context.Context, req *pb.CheckInRequest) (
 			req.Operator.WalletFeatures = nil
 		}
 	}
+	err = endpoint.service.processNodeTags(ctx, nodeID, req.SignedTags)
+	if err != nil {
+		endpoint.log.Info("failed to update node tags", zap.String("node address", req.Address), zap.Stringer("Node ID", nodeID), zap.Error(err))
+	}
 
 	nodeInfo := overlay.NodeCheckInInfo{
 		NodeID: peerID.ID,
 		Address: &pb.NodeAddress{
-			Address:   req.Address,
-			NoiseInfo: noiseInfo,
+			Address:       req.Address,
+			NoiseInfo:     noiseInfo,
+			DebounceLimit: req.DebounceLimit,
+			Features:      req.Features,
 		},
 		LastNet:    resolvedNetwork,
 		LastIPPort: net.JoinHostPort(resolvedIP.String(), port),
@@ -129,7 +135,7 @@ func (endpoint *Endpoint) CheckIn(ctx context.Context, req *pb.CheckInRequest) (
 		Version:    req.Version,
 	}
 
-	endpoint.emitEvenkitEvent(ctx, req, pingNodeSuccess, pingNodeSuccessQUIC, nodeInfo)
+	emitEventkitEvent(ctx, req, pingNodeSuccess, pingNodeSuccessQUIC, nodeInfo)
 
 	err = endpoint.service.overlay.UpdateCheckIn(ctx, nodeInfo, time.Now().UTC())
 	if err != nil {
@@ -145,7 +151,7 @@ func (endpoint *Endpoint) CheckIn(ctx context.Context, req *pb.CheckInRequest) (
 	}, nil
 }
 
-func (endpoint *Endpoint) emitEvenkitEvent(ctx context.Context, req *pb.CheckInRequest, pingNodeTCPSuccess bool, pingNodeQUICSuccess bool, nodeInfo overlay.NodeCheckInInfo) {
+func emitEventkitEvent(ctx context.Context, req *pb.CheckInRequest, pingNodeTCPSuccess bool, pingNodeQUICSuccess bool, nodeInfo overlay.NodeCheckInInfo) {
 	var sourceAddr string
 	transport, found := drpcctx.Transport(ctx)
 	if found {
@@ -157,18 +163,26 @@ func (endpoint *Endpoint) emitEvenkitEvent(ctx context.Context, req *pb.CheckInR
 		}
 	}
 
-	ek.Event("checkin",
+	tags := []eventkit.Tag{
 		eventkit.String("id", nodeInfo.NodeID.String()),
 		eventkit.String("addr", req.Address),
 		eventkit.String("resolved-addr", nodeInfo.LastIPPort),
 		eventkit.String("source-addr", sourceAddr),
-		eventkit.Timestamp("build-time", nodeInfo.Version.Timestamp),
-		eventkit.String("version", nodeInfo.Version.Version),
 		eventkit.String("country", nodeInfo.CountryCode.String()),
-		eventkit.Int64("free-disk", nodeInfo.Capacity.FreeDisk),
 		eventkit.Bool("ping-tpc-success", pingNodeTCPSuccess),
 		eventkit.Bool("ping-quic-success", pingNodeQUICSuccess),
-	)
+	}
+
+	if nodeInfo.Capacity != nil {
+		eventkit.Int64("free-disk", nodeInfo.Capacity.FreeDisk)
+	}
+
+	if nodeInfo.Version != nil {
+		eventkit.Timestamp("build-time", nodeInfo.Version.Timestamp)
+		eventkit.String("version", nodeInfo.Version.Version)
+	}
+
+	ek.Event("checkin", tags...)
 }
 
 // GetTime returns current timestamp.
@@ -205,7 +219,7 @@ func (endpoint *Endpoint) PingMe(ctx context.Context, req *pb.PingMeRequest) (_ 
 		Address: req.Address,
 	}
 
-	resolvedIP, _, _, err := overlay.ResolveIPAndNetwork(ctx, req.Address)
+	resolvedIP, _, _, err := endpoint.service.overlay.ResolveIPAndNetwork(ctx, req.Address)
 	if err != nil {
 		endpoint.log.Info("failed to resolve IP from address", zap.String("node address", req.Address), zap.Stringer("Node ID", nodeID), zap.Error(err))
 		return nil, rpcstatus.Error(rpcstatus.InvalidArgument, errCheckInNetwork.New("failed to resolve IP from address: %s, err: %v", req.Address, err).Error())

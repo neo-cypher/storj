@@ -6,12 +6,11 @@ import {
     Coupon,
     CreditCard,
     PaymentsApi,
-    PaymentsHistoryItem,
-    ProjectUsageAndCharges,
     ProjectUsagePriceModel,
     TokenDeposit,
     NativePaymentHistoryItem,
     Wallet,
+    ProjectCharges, PaymentHistoryParam, PaymentHistoryPage,
 } from '@/types/payments';
 
 /**
@@ -32,8 +31,8 @@ export class PaymentsMock implements PaymentsApi {
         return Promise.resolve(new AccountBalance());
     }
 
-    projectsUsageAndCharges(): Promise<ProjectUsageAndCharges[]> {
-        return Promise.resolve([]);
+    projectsUsageAndCharges(): Promise<ProjectCharges> {
+        return Promise.resolve(new ProjectCharges());
     }
 
     projectUsagePriceModel(): Promise<ProjectUsagePriceModel> {
@@ -56,8 +55,8 @@ export class PaymentsMock implements PaymentsApi {
         throw new Error('Method not implemented');
     }
 
-    paymentsHistory(): Promise<PaymentsHistoryItem[]> {
-        return Promise.resolve([]);
+    paymentsHistory(param: PaymentHistoryParam): Promise<PaymentHistoryPage> {
+        return Promise.resolve(new PaymentHistoryPage([]));
     }
 
     nativePaymentsHistory(): Promise<NativePaymentHistoryItem[]> {
@@ -82,5 +81,13 @@ export class PaymentsMock implements PaymentsApi {
 
     claimWallet(): Promise<Wallet> {
         return Promise.resolve(new Wallet());
+    }
+
+    purchasePricingPackage(_: string): Promise<void> {
+        throw new Error('Method not implemented');
+    }
+
+    pricingPackageAvailable(): Promise<boolean> {
+        throw new Error('Method not implemented');
     }
 }

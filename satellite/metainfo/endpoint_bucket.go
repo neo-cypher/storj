@@ -8,14 +8,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 
 	"storj.io/common/macaroon"
 	"storj.io/common/memory"
 	"storj.io/common/pb"
 	"storj.io/common/rpc/rpcstatus"
-	"storj.io/common/storj"
 	"storj.io/common/uuid"
 	"storj.io/storj/satellite/buckets"
 	"storj.io/storj/satellite/metabase"
@@ -35,18 +33,19 @@ func (endpoint *Endpoint) GetBucket(ctx context.Context, req *pb.BucketGetReques
 	if err != nil {
 		return nil, err
 	}
+	endpoint.usageTracking(keyInfo, req.Header, fmt.Sprintf("%T", req))
 
 	bucket, err := endpoint.buckets.GetMinimalBucket(ctx, req.GetName(), keyInfo.ProjectID)
 	if err != nil {
-		if storj.ErrBucketNotFound.Has(err) {
+		if buckets.ErrBucketNotFound.Has(err) {
 			return nil, rpcstatus.Error(rpcstatus.NotFound, err.Error())
 		}
 		endpoint.log.Error("internal", zap.Error(err))
-		return nil, rpcstatus.Error(rpcstatus.Internal, err.Error())
+		return nil, rpcstatus.Error(rpcstatus.Internal, "unable to get bucket metadata")
 	}
 
 	// override RS to fit satellite settings
-	convBucket, err := convertBucketToProto(bucket, endpoint.defaultRS, endpoint.config.MaxSegmentSize)
+	convBucket, err := convertMinimalBucketToProto(bucket, endpoint.defaultRS, endpoint.config.MaxSegmentSize)
 	if err != nil {
 		return resp, err
 	}
@@ -54,6 +53,102 @@ func (endpoint *Endpoint) GetBucket(ctx context.Context, req *pb.BucketGetReques
 	return &pb.BucketGetResponse{
 		Bucket: convBucket,
 	}, nil
+}
+
+// GetBucketLocation responds with the location that the bucket's placement is
+// annotated with (if any) and any error encountered.
+func (endpoint *Endpoint) GetBucketLocation(ctx context.Context, req *pb.GetBucketLocationRequest) (resp *pb.GetBucketLocationResponse, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	endpoint.versionCollector.collect(req.Header.UserAgent, mon.Func().ShortName())
+
+	keyInfo, err := endpoint.validateAuth(ctx, req.Header, macaroon.Action{
+		Op:     macaroon.ActionRead,
+		Bucket: req.Name,
+		Time:   time.Now(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	endpoint.usageTracking(keyInfo, req.Header, fmt.Sprintf("%T", req))
+
+	p, err := endpoint.buckets.GetBucketPlacement(ctx, req.GetName(), keyInfo.ProjectID)
+	if err != nil {
+		if buckets.ErrBucketNotFound.Has(err) {
+			return nil, rpcstatus.Error(rpcstatus.NotFound, err.Error())
+		}
+		endpoint.log.Error("internal", zap.Error(err))
+		return nil, rpcstatus.Error(rpcstatus.Internal, "unable to get the bucket's placement")
+	}
+
+	return &pb.GetBucketLocationResponse{
+		Location: []byte(endpoint.overlay.GetLocationFromPlacement(p)),
+	}, nil
+}
+
+// GetBucketVersioning responds with the versioning state of the bucket and any error encountered.
+func (endpoint *Endpoint) GetBucketVersioning(ctx context.Context, req *pb.GetBucketVersioningRequest) (resp *pb.GetBucketVersioningResponse, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	endpoint.versionCollector.collect(req.Header.UserAgent, mon.Func().ShortName())
+
+	keyInfo, err := endpoint.validateAuth(ctx, req.Header, macaroon.Action{
+		Op:     macaroon.ActionRead,
+		Bucket: req.Name,
+		Time:   time.Now(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	endpoint.usageTracking(keyInfo, req.Header, fmt.Sprintf("%T", req))
+
+	versioning, err := endpoint.buckets.GetBucketVersioningState(ctx, req.GetName(), keyInfo.ProjectID)
+	if err != nil {
+		if buckets.ErrBucketNotFound.Has(err) {
+			return nil, rpcstatus.Error(rpcstatus.NotFound, err.Error())
+		}
+		endpoint.log.Error("internal", zap.Error(err))
+		return nil, rpcstatus.Error(rpcstatus.Internal, "unable to get versioning state for the bucket")
+	}
+
+	return &pb.GetBucketVersioningResponse{
+		Versioning: int32(versioning),
+	}, nil
+}
+
+// SetBucketVersioning attempts to enable or disable versioning for a bucket and responds with any error encountered.
+func (endpoint *Endpoint) SetBucketVersioning(ctx context.Context, req *pb.SetBucketVersioningRequest) (resp *pb.SetBucketVersioningResponse, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	endpoint.versionCollector.collect(req.Header.UserAgent, mon.Func().ShortName())
+
+	keyInfo, err := endpoint.validateAuth(ctx, req.Header, macaroon.Action{
+		Op:     macaroon.ActionWrite,
+		Bucket: req.Name,
+		Time:   time.Now(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	endpoint.usageTracking(keyInfo, req.Header, fmt.Sprintf("%T", req))
+
+	if !endpoint.config.UseBucketLevelObjectVersioningByProject(keyInfo.ProjectID) {
+		return nil, rpcstatus.Error(rpcstatus.PermissionDenied, "versioning not allowed for this project")
+	}
+	if req.Versioning {
+		err = endpoint.buckets.EnableBucketVersioning(ctx, req.GetName(), keyInfo.ProjectID)
+	} else {
+		err = endpoint.buckets.SuspendBucketVersioning(ctx, req.GetName(), keyInfo.ProjectID)
+	}
+	if err != nil {
+		if buckets.ErrBucketNotFound.Has(err) {
+			return nil, rpcstatus.Error(rpcstatus.NotFound, err.Error())
+		}
+		endpoint.log.Error("internal", zap.Error(err))
+		return nil, rpcstatus.Error(rpcstatus.Internal, "unable to enable versioning for the bucket")
+	}
+
+	return &pb.SetBucketVersioningResponse{}, nil
 }
 
 // CreateBucket creates a new bucket.
@@ -70,8 +165,9 @@ func (endpoint *Endpoint) CreateBucket(ctx context.Context, req *pb.BucketCreate
 	if err != nil {
 		return nil, err
 	}
+	endpoint.usageTracking(keyInfo, req.Header, fmt.Sprintf("%T", req))
 
-	err = endpoint.validateBucket(ctx, req.Name)
+	err = endpoint.validateBucketName(req.Name)
 	if err != nil {
 		return nil, rpcstatus.Error(rpcstatus.InvalidArgument, err.Error())
 	}
@@ -80,10 +176,10 @@ func (endpoint *Endpoint) CreateBucket(ctx context.Context, req *pb.BucketCreate
 	exists, err := endpoint.buckets.HasBucket(ctx, req.GetName(), keyInfo.ProjectID)
 	if err != nil {
 		endpoint.log.Error("internal", zap.Error(err))
-		return nil, rpcstatus.Error(rpcstatus.Internal, err.Error())
+		return nil, rpcstatus.Error(rpcstatus.Internal, "unable to check if bucket exists")
 	} else if exists {
 		// When the bucket exists, try to set the attribution.
-		if err := endpoint.ensureAttribution(ctx, req.Header, keyInfo, req.GetName(), nil); err != nil {
+		if err := endpoint.ensureAttribution(ctx, req.Header, keyInfo, req.GetName(), nil, true); err != nil {
 			return nil, err
 		}
 		return nil, rpcstatus.Error(rpcstatus.AlreadyExists, "bucket already exists")
@@ -110,20 +206,32 @@ func (endpoint *Endpoint) CreateBucket(ctx context.Context, req *pb.BucketCreate
 	if err != nil {
 		return nil, rpcstatus.Error(rpcstatus.InvalidArgument, err.Error())
 	}
+	bucketReq.Placement = project.DefaultPlacement
 
+	if endpoint.config.UseBucketLevelObjectVersioningByProject(keyInfo.ProjectID) {
+		if endpoint.config.TestEnableBucketVersioning {
+			bucketReq.Versioning = buckets.VersioningEnabled
+		} else {
+			bucketReq.Versioning = buckets.Unversioned
+		}
+	}
 	bucket, err := endpoint.buckets.CreateBucket(ctx, bucketReq)
 	if err != nil {
+		if buckets.ErrBucketAlreadyExists.Has(err) {
+			return nil, rpcstatus.Error(rpcstatus.AlreadyExists, "bucket already exists")
+		}
+
 		endpoint.log.Error("error while creating bucket", zap.String("bucketName", bucketReq.Name), zap.Error(err))
 		return nil, rpcstatus.Error(rpcstatus.Internal, "unable to create bucket")
 	}
 
 	// Once we have created the bucket, we can try setting the attribution.
-	if err := endpoint.ensureAttribution(ctx, req.Header, keyInfo, req.GetName(), project.UserAgent); err != nil {
+	if err := endpoint.ensureAttribution(ctx, req.Header, keyInfo, req.GetName(), project.UserAgent, true); err != nil {
 		return nil, err
 	}
 
 	// override RS to fit satellite settings
-	convBucket, err := convertBucketToProto(buckets.Bucket{
+	convBucket, err := convertMinimalBucketToProto(buckets.MinimalBucket{
 		Name:      []byte(bucket.Name),
 		CreatedAt: bucket.Created,
 	}, endpoint.defaultRS, endpoint.config.MaxSegmentSize)
@@ -177,27 +285,28 @@ func (endpoint *Endpoint) DeleteBucket(ctx context.Context, req *pb.BucketDelete
 	if err != nil {
 		return nil, err
 	}
+	endpoint.usageTracking(keyInfo, req.Header, fmt.Sprintf("%T", req))
 
-	err = endpoint.validateBucket(ctx, req.Name)
+	err = endpoint.validateBucketNameLength(req.Name)
 	if err != nil {
 		return nil, rpcstatus.Error(rpcstatus.InvalidArgument, err.Error())
 	}
 
 	var (
-		bucket     buckets.Bucket
+		bucket     buckets.MinimalBucket
 		convBucket *pb.Bucket
 	)
 	if canRead || canList {
 		// Info about deleted bucket is returned only if either Read, or List permission is granted.
 		bucket, err = endpoint.buckets.GetMinimalBucket(ctx, req.Name, keyInfo.ProjectID)
 		if err != nil {
-			if storj.ErrBucketNotFound.Has(err) {
+			if buckets.ErrBucketNotFound.Has(err) {
 				return nil, rpcstatus.Error(rpcstatus.NotFound, err.Error())
 			}
 			return nil, err
 		}
 
-		convBucket, err = convertBucketToProto(bucket, endpoint.defaultRS, endpoint.config.MaxSegmentSize)
+		convBucket, err = convertMinimalBucketToProto(bucket, endpoint.defaultRS, endpoint.config.MaxSegmentSize)
 		if err != nil {
 			return nil, err
 		}
@@ -222,11 +331,11 @@ func (endpoint *Endpoint) DeleteBucket(ctx context.Context, req *pb.BucketDelete
 
 			return &pb.BucketDeleteResponse{Bucket: convBucket, DeletedObjectsCount: deletedObjCount}, nil
 		}
-		if storj.ErrBucketNotFound.Has(err) {
+		if buckets.ErrBucketNotFound.Has(err) {
 			return &pb.BucketDeleteResponse{Bucket: convBucket}, nil
 		}
 		endpoint.log.Error("internal", zap.Error(err))
-		return nil, rpcstatus.Error(rpcstatus.Internal, err.Error())
+		return nil, rpcstatus.Error(rpcstatus.Internal, "unable to delete bucket")
 	}
 
 	return &pb.BucketDeleteResponse{Bucket: convBucket}, nil
@@ -262,7 +371,7 @@ func (endpoint *Endpoint) deleteBucketNotEmpty(ctx context.Context, projectID uu
 	deletedCount, err := endpoint.deleteBucketObjects(ctx, projectID, bucketName)
 	if err != nil {
 		endpoint.log.Error("internal", zap.Error(err))
-		return nil, 0, rpcstatus.Error(rpcstatus.Internal, err.Error())
+		return nil, 0, rpcstatus.Error(rpcstatus.Internal, "internal error")
 	}
 
 	err = endpoint.deleteBucket(ctx, bucketName, projectID)
@@ -270,11 +379,11 @@ func (endpoint *Endpoint) deleteBucketNotEmpty(ctx context.Context, projectID uu
 		if ErrBucketNotEmpty.Has(err) {
 			return nil, deletedCount, rpcstatus.Error(rpcstatus.FailedPrecondition, "cannot delete the bucket because it's being used by another process")
 		}
-		if storj.ErrBucketNotFound.Has(err) {
+		if buckets.ErrBucketNotFound.Has(err) {
 			return bucketName, 0, nil
 		}
 		endpoint.log.Error("internal", zap.Error(err))
-		return nil, deletedCount, rpcstatus.Error(rpcstatus.Internal, err.Error())
+		return nil, deletedCount, rpcstatus.Error(rpcstatus.Internal, "internal error")
 	}
 
 	return bucketName, deletedCount, nil
@@ -287,10 +396,6 @@ func (endpoint *Endpoint) deleteBucketObjects(ctx context.Context, projectID uui
 	bucketLocation := metabase.BucketLocation{ProjectID: projectID, BucketName: string(bucketName)}
 	deletedObjects, err := endpoint.metabase.DeleteBucketObjects(ctx, metabase.DeleteBucketObjects{
 		Bucket: bucketLocation,
-		DeletePieces: func(ctx context.Context, deleted []metabase.DeletedSegmentInfo) error {
-			endpoint.deleteSegmentPieces(ctx, deleted)
-			return nil
-		},
 	})
 
 	return deletedObjects, Error.Wrap(err)
@@ -312,16 +417,17 @@ func (endpoint *Endpoint) ListBuckets(ctx context.Context, req *pb.BucketListReq
 	if err != nil {
 		return nil, err
 	}
+	endpoint.usageTracking(keyInfo, req.Header, fmt.Sprintf("%T", req))
 
 	allowedBuckets, err := getAllowedBuckets(ctx, req.Header, action)
 	if err != nil {
 		return nil, err
 	}
 
-	listOpts := storj.BucketListOptions{
+	listOpts := buckets.ListOptions{
 		Cursor:    string(req.Cursor),
 		Limit:     int(req.Limit),
-		Direction: storj.ListDirection(req.Direction),
+		Direction: req.Direction,
 	}
 	bucketList, err := endpoint.buckets.ListBuckets(ctx, keyInfo.ProjectID, listOpts, allowedBuckets)
 	if err != nil {
@@ -365,31 +471,20 @@ func getAllowedBuckets(ctx context.Context, header *pb.RequestHeader, action mac
 	return allowedBuckets, err
 }
 
-func convertProtoToBucket(req *pb.BucketCreateRequest, projectID uuid.UUID) (bucket storj.Bucket, err error) {
+func convertProtoToBucket(req *pb.BucketCreateRequest, projectID uuid.UUID) (bucket buckets.Bucket, err error) {
 	bucketID, err := uuid.New()
 	if err != nil {
-		return storj.Bucket{}, err
+		return buckets.Bucket{}, err
 	}
 
-	// TODO: resolve partner id
-	var partnerID uuid.UUID
-	err = partnerID.UnmarshalJSON(req.GetPartnerId())
-
-	// bucket's partnerID should never be set
-	// it is always read back from buckets DB
-	if err != nil && !partnerID.IsZero() {
-		return bucket, errs.New("Invalid uuid")
-	}
-
-	return storj.Bucket{
+	return buckets.Bucket{
 		ID:        bucketID,
 		Name:      string(req.GetName()),
 		ProjectID: projectID,
-		PartnerID: partnerID,
 	}, nil
 }
 
-func convertBucketToProto(bucket buckets.Bucket, rs *pb.RedundancyScheme, maxSegmentSize memory.Size) (pbBucket *pb.Bucket, err error) {
+func convertMinimalBucketToProto(bucket buckets.MinimalBucket, rs *pb.RedundancyScheme, maxSegmentSize memory.Size) (pbBucket *pb.Bucket, err error) {
 	if len(bucket.Name) == 0 {
 		return nil, nil
 	}

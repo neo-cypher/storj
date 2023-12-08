@@ -6,19 +6,16 @@ package server
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"os"
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 
-	"github.com/flynn/noise"
 	"github.com/jtolio/noiseconn"
-	"github.com/zeebo/blake3"
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -29,6 +26,7 @@ import (
 	"storj.io/common/pb"
 	"storj.io/common/peertls/tlsopts"
 	"storj.io/common/rpc"
+	"storj.io/common/rpc/noise"
 	"storj.io/common/rpc/quic"
 	"storj.io/common/rpc/rpctracing"
 	"storj.io/drpc"
@@ -36,6 +34,20 @@ import (
 	"storj.io/drpc/drpcmux"
 	"storj.io/drpc/drpcserver"
 	jaeger "storj.io/monkit-jaeger"
+	"storj.io/storj/private/server/debounce"
+)
+
+const (
+	// tcpMaxPacketAge is the maximum amount of time we expect to worry about
+	// an undelivered TCP packet lingering in the network. TCP TTL isn't
+	// supposed to exceed about 4 minutes, so this is double that with
+	// padding.
+	tcpMaxPacketAge = 10 * time.Minute
+	// debounceLimit is the amount of times the server should worry about
+	// debouncing incoming noise  or TLS messages, per message. debouncing
+	// won't happen if the number of identical packets received is larger than
+	// this.
+	debounceLimit = 2
 )
 
 // Config holds server specific configuration parameters.
@@ -48,8 +60,9 @@ type Config struct {
 	DisableTCP      bool `help:"disable TCP listener on a server" internal:"true"`
 	DebugLogTraffic bool `hidden:"true" default:"false"` // Deprecated
 
-	TCPFastOpen      bool `help:"enable support for tcp fast open experiment" default:"true"`
-	TCPFastOpenQueue int  `help:"the size of the tcp fast open queue" default:"256"`
+	TCPFastOpen       bool `help:"enable support for tcp fast open" default:"true"`
+	TCPFastOpenQueue  int  `help:"the size of the tcp fast open queue" default:"256"`
+	DebouncingEnabled bool `help:"whether to debounce incoming messages" default:"true"`
 }
 
 // Server represents a bundle of services defined by a specific ID.
@@ -59,6 +72,7 @@ type Server struct {
 	tlsOptions *tlsopts.Options
 	noiseConf  noise.Config
 	config     Config
+	fastOpen   bool
 
 	publicTCPListener  net.Listener
 	publicUDPConn      *net.UDPConn
@@ -79,36 +93,10 @@ type Server struct {
 	done chan struct{}
 }
 
-func identityBasedEntropy(context string, ident *identity.FullIdentity) (io.Reader, error) {
-	h := blake3.NewDeriveKey(context)
-
-	serialized, err := x509.MarshalPKCS8PrivateKey(ident.Key)
-	if err != nil {
-		return nil, Error.Wrap(err)
-	}
-
-	_, err = h.Write(serialized)
-	return h.Digest(), Error.Wrap(err)
-}
-
-func generateNoiseConf(ident *identity.FullIdentity) (noise.Config, error) {
-	noiseConf := defaultNoiseConfig()
-	noiseConf.Initiator = false
-	entropy, err := identityBasedEntropy("noise key", ident)
-	if err != nil {
-		return noise.Config{}, err
-	}
-	noiseConf.StaticKeypair, err = noiseConf.CipherSuite.GenerateKeypair(entropy)
-	if err != nil {
-		return noise.Config{}, Error.Wrap(err)
-	}
-	return noiseConf, nil
-}
-
 // New creates a Server out of an Identity, a net.Listener,
 // and interceptors.
 func New(log *zap.Logger, tlsOptions *tlsopts.Options, config Config) (_ *Server, err error) {
-	noiseConf, err := generateNoiseConf(tlsOptions.Ident)
+	noiseConf, err := noise.GenerateServerConf(noise.DefaultProto, tlsOptions.Ident)
 	if err != nil {
 		return nil, err
 	}
@@ -128,14 +116,16 @@ func New(log *zap.Logger, tlsOptions *tlsopts.Options, config Config) (_ *Server
 
 	listenConfig := net.ListenConfig{}
 	if config.TCPFastOpen {
-		tryInitFastOpen(log)
-		listenConfig.Control = func(network, address string, c syscall.RawConn) error {
-			return c.Control(func(fd uintptr) {
-				err := setTCPFastOpen(fd, config.TCPFastOpenQueue)
-				if err != nil {
-					log.Sugar().Infof("failed to set tcp fast open for this socket: %v", err)
-				}
-			})
+		server.fastOpen = tryInitFastOpen(log)
+		if server.fastOpen {
+			listenConfig.Control = func(network, address string, c syscall.RawConn) error {
+				return c.Control(func(fd uintptr) {
+					err := setTCPFastOpen(fd, config.TCPFastOpenQueue)
+					if err != nil {
+						log.Sugar().Infof("failed to set tcp fast open for this socket: %v", err)
+					}
+				})
+			}
 		}
 	}
 
@@ -208,12 +198,16 @@ func (p *Server) Addr() net.Addr { return p.addr }
 // PrivateAddr returns the server's private listener address.
 func (p *Server) PrivateAddr() net.Addr { return p.privateTCPListener.Addr() }
 
-// DRPC returns the server's DRPC mux for registration purposes.
+// DRPC returns the server's DRPC mux that supports all endpoints for
+// registration purposes.
 func (p *Server) DRPC() drpc.Mux {
-	return newReplayRouter(
-		p.publicEndpointsReplaySafe.mux,
-		p.publicEndpointsAll.mux,
-	)
+	return p.publicEndpointsAll.mux
+}
+
+// ReplaySafeDRPC returns the server's DRPC mux that supports replay safe
+// endpoints for registration purposes.
+func (p *Server) ReplaySafeDRPC() drpc.Mux {
+	return p.publicEndpointsReplaySafe.mux
 }
 
 // PrivateDRPC returns the server's DRPC mux for registration purposes.
@@ -222,19 +216,29 @@ func (p *Server) PrivateDRPC() drpc.Mux { return p.privateEndpoints.mux }
 // IsQUICEnabled checks if QUIC is enabled by config and udp port is open.
 func (p *Server) IsQUICEnabled() bool { return !p.config.DisableQUIC && p.publicUDPConn != nil }
 
-// NoiseInfo returns the noise configuration for this server. This includes the
-// keypair in use.
-func (p *Server) NoiseInfo() *pb.NoiseInfo {
-	return &pb.NoiseInfo{
-		Proto:     defaultNoiseProto,
-		PublicKey: p.noiseConf.StaticKeypair.Public,
-	}
-}
-
 // NoiseKeyAttestation returns the noise key attestation for this server.
 func (p *Server) NoiseKeyAttestation(ctx context.Context) (_ *pb.NoiseKeyAttestation, err error) {
 	defer mon.Task()(&ctx)(&err)
-	return GenerateNoiseKeyAttestation(ctx, p.tlsOptions.Ident, p.NoiseInfo())
+	info, err := noise.ConfigToInfo(p.noiseConf)
+	if err != nil {
+		return nil, err
+	}
+	return noise.GenerateKeyAttestation(ctx, p.tlsOptions.Ident, info)
+}
+
+// DebounceLimit is the amount of times the server is able to
+// debounce incoming noise or TLS messages, per message.
+func (p *Server) DebounceLimit() int {
+	if !p.config.DebouncingEnabled {
+		return 0
+	}
+	return debounceLimit
+}
+
+// FastOpen returns true if FastOpen is possibly open. false means we
+// know FastOpen is off.
+func (p *Server) FastOpen() bool {
+	return p.fastOpen
 }
 
 // Close shuts down the server.
@@ -327,8 +331,20 @@ func (p *Server) Run(ctx context.Context) (err error) {
 
 	if p.publicTCPListener != nil {
 		publicLMux := drpcmigrate.NewListenMux(p.publicTCPListener, len(drpcmigrate.DRPCHeader))
-		publicTLSDRPCListener = tls.NewListener(publicLMux.Route(drpcmigrate.DRPCHeader), p.tlsOptions.ServerTLSConfig())
-		publicNoiseDRPCListener = noiseconn.NewListener(publicLMux.Route(NoiseHeader), p.noiseConf)
+		tlsMux := publicLMux.Route(drpcmigrate.DRPCHeader)
+		var noiseOpts noiseconn.Options
+
+		if p.config.DebouncingEnabled {
+			debouncer := debounce.NewDebouncer(tcpMaxPacketAge, debounceLimit)
+			tlsMux = tlsDebounce(tlsMux, debouncer.ResponderFirstMessageValidator)
+			noiseOpts.ResponderFirstMessageValidator = debouncer.ResponderFirstMessageValidator
+		}
+
+		publicTLSDRPCListener = tls.NewListener(tlsMux, p.tlsOptions.ServerTLSConfig())
+		publicNoiseDRPCListener = noiseconn.NewListenerWithOptions(
+			publicLMux.Route(noise.Header),
+			p.noiseConf,
+			noiseOpts)
 		if p.publicHTTP != nil {
 			publicHTTPListener = NewPrefixedListener([]byte("GET / HT"), publicLMux.Route("GET / HT"))
 		}

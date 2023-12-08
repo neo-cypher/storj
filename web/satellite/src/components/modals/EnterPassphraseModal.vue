@@ -5,35 +5,39 @@
     <VModal :on-close="closeModal">
         <template #content>
             <div class="modal">
-                <EnterPassphraseIcon />
-                <h1 class="modal__title">Enter your encryption passphrase</h1>
+                <div class="modal__header">
+                    <AccessEncryptionIcon />
+                    <h1 class="modal__header__title">Enter passphrase</h1>
+                </div>
                 <p class="modal__info">
-                    To open a project and view your encrypted files, <br>please enter your encryption passphrase.
+                    Enter your encryption passphrase to view and manage your data in the browser. This passphrase will
+                    be used to unlock all buckets in this project.
                 </p>
                 <VInput
                     label="Encryption Passphrase"
-                    placeholder="Enter your passphrase"
+                    placeholder="Enter a passphrase here"
                     :error="enterError"
                     role-description="passphrase"
                     is-password
-                    :disabled="isLoading"
+                    :autocomplete="autocompleteValue"
                     @setData="setPassphrase"
                 />
                 <div class="modal__buttons">
                     <VButton
-                        label="Enter without passphrase"
+                        label="Skip"
                         height="48px"
                         font-size="14px"
+                        border-radius="10px"
                         :is-transparent="true"
-                        :on-press="closeModal"
-                        :is-disabled="isLoading"
+                        :on-press="skipPassphrase"
                     />
                     <VButton
                         label="Continue ->"
                         height="48px"
                         font-size="14px"
+                        border-radius="10px"
                         :on-press="onContinue"
-                        :is-disabled="isLoading"
+                        :is-disabled="!passphrase"
                     />
                 </div>
             </div>
@@ -41,164 +45,86 @@
     </VModal>
 </template>
 
-<script lang="ts">
-import { Component, Vue } from 'vue-property-decorator';
+<script setup lang="ts">
+import { computed, ref } from 'vue';
 
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
-import { OBJECTS_ACTIONS, OBJECTS_MUTATIONS } from '@/store/modules/objects';
-import { MetaUtils } from '@/utils/meta';
-import { AccessGrant, EdgeCredentials } from '@/types/accessGrants';
-import { ACCESS_GRANTS_ACTIONS } from '@/store/modules/accessGrants';
-import { AnalyticsHttpApi } from '@/api/analytics';
-import { PROJECTS_ACTIONS } from '@/store/modules/projects';
-import { AnalyticsErrorEventSource } from '@/utils/constants/analyticsEventNames';
+import { AnalyticsErrorEventSource, AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
+import { useAppStore } from '@/store/modules/appStore';
+import { useBucketsStore } from '@/store/modules/bucketsStore';
+import { MODALS } from '@/utils/constants/appStatePopUps';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
+import { useProjectsStore } from '@/store/modules/projectsStore';
 
 import VModal from '@/components/common/VModal.vue';
 import VInput from '@/components/common/VInput.vue';
 import VButton from '@/components/common/VButton.vue';
 
-import EnterPassphraseIcon from '@/../static/images/buckets/openBucket.svg';
+import AccessEncryptionIcon from '@/../static/images/accessGrants/newCreateFlow/accessEncryption.svg';
 
-// @vue/component
-@Component({
-    components: {
-        VInput,
-        VModal,
-        VButton,
-        EnterPassphraseIcon,
-    },
-})
-export default class EnterPassphraseModal extends Vue {
-    private worker: Worker;
-    private readonly FILE_BROWSER_AG_NAME: string = 'Web file browser API key';
-    private readonly analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
+const analyticsStore = useAnalyticsStore();
+const bucketsStore = useBucketsStore();
+const appStore = useAppStore();
+const projectsStore = useProjectsStore();
 
-    public enterError = '';
-    public passphrase = '';
-    public isLoading = false;
+const enterError = ref<string>('');
+const passphrase = ref<string>('');
 
-    /**
-     * Lifecycle hook after initial render.
-     * Sets local worker.
-     */
-    public mounted(): void {
-        this.setWorker();
+/**
+ * Returns formatted autocomplete value.
+ */
+const autocompleteValue = computed((): string => {
+    return `section-${selectedProjectID.value.toLowerCase()} new-password`;
+});
+
+/**
+ * Returns selected project ID from store.
+ */
+const selectedProjectID = computed((): string => {
+    return projectsStore.state.selectedProject.id;
+});
+
+/**
+ * Sets passphrase.
+ */
+function onContinue(): void {
+    if (!passphrase.value) {
+        enterError.value = 'Passphrase can\'t be empty';
+        analyticsStore.errorEventTriggered(AnalyticsErrorEventSource.OPEN_BUCKET_MODAL);
+
+        return;
     }
 
-    /**
-     * Sets access and navigates to object browser.
-     */
-    public async onContinue(): Promise<void> {
-        if (this.isLoading) return;
+    analyticsStore.eventTriggered(AnalyticsEvent.PASSPHRASE_CREATED, {
+        method: 'enter',
+    });
 
-        if (!this.passphrase) {
-            this.enterError = 'Passphrase can\'t be empty';
-            this.analytics.errorEventTriggered(AnalyticsErrorEventSource.OPEN_BUCKET_MODAL);
+    bucketsStore.setPassphrase(passphrase.value);
+    bucketsStore.setPromptForPassphrase(false);
 
-            return;
-        }
+    closeModal();
+}
 
-        this.isLoading = true;
+/**
+ * Opens the SkipPassphrase modal for confirmation.
+ */
+function skipPassphrase(): void {
+    appStore.updateActiveModal(MODALS.skipPassphrase);
+}
 
-        try {
-            await this.setAccess();
-            this.isLoading = false;
+/**
+ * Closes enter passphrase modal.
+ */
+function closeModal(): void {
+    appStore.removeActiveModal();
+}
 
-            this.closeModal();
-        } catch (error) {
-            await this.$notify.error(error.message, AnalyticsErrorEventSource.OPEN_BUCKET_MODAL);
-            this.isLoading = false;
-        }
-    }
+/**
+ * Sets passphrase from child component.
+ */
+function setPassphrase(value: string): void {
+    if (enterError.value) enterError.value = '';
 
-    /**
-     * Sets access to S3 client.
-     */
-    public async setAccess(): Promise<void> {
-        if (!this.apiKey) {
-            await this.$store.dispatch(ACCESS_GRANTS_ACTIONS.DELETE_BY_NAME_AND_PROJECT_ID, this.FILE_BROWSER_AG_NAME);
-            const cleanAPIKey: AccessGrant = await this.$store.dispatch(ACCESS_GRANTS_ACTIONS.CREATE, this.FILE_BROWSER_AG_NAME);
-            await this.$store.dispatch(OBJECTS_ACTIONS.SET_API_KEY, cleanAPIKey.secret);
-        }
-
-        const now = new Date();
-        const inThreeDays = new Date(now.setDate(now.getDate() + 3));
-
-        await this.worker.postMessage({
-            'type': 'SetPermission',
-            'isDownload': true,
-            'isUpload': true,
-            'isList': true,
-            'isDelete': true,
-            'notAfter': inThreeDays.toISOString(),
-            'buckets': [],
-            'apiKey': this.apiKey,
-        });
-
-        const grantEvent: MessageEvent = await new Promise(resolve => this.worker.onmessage = resolve);
-        if (grantEvent.data.error) {
-            throw new Error(grantEvent.data.error);
-        }
-
-        const salt = await this.$store.dispatch(PROJECTS_ACTIONS.GET_SALT, this.$store.getters.selectedProject.id);
-        const satelliteNodeURL: string = MetaUtils.getMetaContent('satellite-nodeurl');
-
-        this.worker.postMessage({
-            'type': 'GenerateAccess',
-            'apiKey': grantEvent.data.value,
-            'passphrase': this.passphrase,
-            'salt': salt,
-            'satelliteNodeURL': satelliteNodeURL,
-        });
-
-        const accessGrantEvent: MessageEvent = await new Promise(resolve => this.worker.onmessage = resolve);
-        if (accessGrantEvent.data.error) {
-            throw new Error(accessGrantEvent.data.error);
-        }
-
-        const accessGrant = accessGrantEvent.data.value;
-
-        const gatewayCredentials: EdgeCredentials = await this.$store.dispatch(ACCESS_GRANTS_ACTIONS.GET_GATEWAY_CREDENTIALS, { accessGrant });
-        await this.$store.dispatch(OBJECTS_ACTIONS.SET_GATEWAY_CREDENTIALS, gatewayCredentials);
-        await this.$store.dispatch(OBJECTS_ACTIONS.SET_S3_CLIENT);
-        await this.$store.commit(OBJECTS_MUTATIONS.SET_PROMPT_FOR_PASSPHRASE, false);
-    }
-
-    /**
-     * Sets local worker with worker instantiated in store.
-     */
-    public setWorker(): void {
-        this.worker = this.$store.state.accessGrantsModule.accessGrantsWebWorker;
-        this.worker.onerror = (error: ErrorEvent) => {
-            this.$notify.error(error.message, AnalyticsErrorEventSource.OPEN_BUCKET_MODAL);
-        };
-    }
-
-    /**
-     * Closes open bucket modal.
-     */
-    public closeModal(): void {
-        if (this.isLoading) return;
-
-        this.$store.commit(APP_STATE_MUTATIONS.TOGGLE_ENTER_PASSPHRASE_MODAL_SHOWN);
-    }
-
-    /**
-     * Sets passphrase from child component.
-     */
-    public setPassphrase(passphrase: string): void {
-        if (this.enterError) this.enterError = '';
-
-        this.passphrase = passphrase;
-        this.$store.dispatch(OBJECTS_ACTIONS.SET_PASSPHRASE, this.passphrase);
-    }
-
-    /**
-     * Returns apiKey from store.
-     */
-    private get apiKey(): string {
-        return this.$store.state.objectsModule.apiKey;
-    }
+    passphrase.value = value;
 }
 </script>
 
@@ -207,28 +133,34 @@ export default class EnterPassphraseModal extends Vue {
         font-family: 'font_regular', sans-serif;
         display: flex;
         flex-direction: column;
-        align-items: center;
-        padding: 62px 62px 54px;
-        max-width: 500px;
+        padding: 32px;
+        max-width: 350px;
 
-        @media screen and (max-width: 600px) {
-            padding: 62px 24px 54px;
-        }
+        &__header {
+            display: flex;
+            align-items: center;
+            padding-bottom: 16px;
+            margin-bottom: 16px;
+            border-bottom: 1px solid var(--c-grey-2);
 
-        &__title {
-            font-family: 'font_bold', sans-serif;
-            font-size: 26px;
-            line-height: 31px;
-            color: #131621;
-            margin: 30px 0 15px;
+            &__title {
+                font-family: 'font_bold', sans-serif;
+                font-size: 24px;
+                line-height: 31px;
+                color: var(--c-grey-8);
+                margin-left: 16px;
+                text-align: left;
+            }
         }
 
         &__info {
-            font-size: 16px;
-            line-height: 21px;
-            text-align: center;
+            font-size: 14px;
+            line-height: 19px;
             color: #354049;
-            margin-bottom: 32px;
+            padding-bottom: 16px;
+            margin-bottom: 16px;
+            border-bottom: 1px solid var(--c-grey-2);
+            text-align: left;
         }
 
         &__buttons {
@@ -237,7 +169,7 @@ export default class EnterPassphraseModal extends Vue {
             margin-top: 31px;
             width: 100%;
 
-            @media screen and (max-width: 500px) {
+            @media screen and (width <= 500px) {
                 flex-direction: column-reverse;
                 column-gap: unset;
                 row-gap: 20px;

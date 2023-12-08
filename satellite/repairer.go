@@ -26,7 +26,6 @@ import (
 	version_checker "storj.io/storj/private/version/checker"
 	"storj.io/storj/satellite/audit"
 	"storj.io/storj/satellite/buckets"
-	"storj.io/storj/satellite/mailservice"
 	"storj.io/storj/satellite/metabase"
 	"storj.io/storj/satellite/nodeevents"
 	"storj.io/storj/satellite/orders"
@@ -58,13 +57,10 @@ type Repairer struct {
 		Server   *debug.Server
 	}
 
-	Mail       *mailservice.Service
 	Overlay    *overlay.Service
 	Reputation *reputation.Service
 	Orders     struct {
-		DB      orders.DB
 		Service *orders.Service
-		Chore   *orders.Chore
 	}
 
 	Audit struct {
@@ -86,7 +82,6 @@ func NewRepairer(log *zap.Logger, full *identity.FullIdentity,
 	nodeEvents nodeevents.DB,
 	reputationdb reputation.DB,
 	containmentDB audit.Containment,
-	rollupsWriteCache *orders.RollupsWriteCache,
 	versionInfo version.Info, config *Config, atomicLogLevel *zap.AtomicLevel,
 ) (*Repairer, error) {
 	peer := &Repairer{
@@ -99,8 +94,8 @@ func NewRepairer(log *zap.Logger, full *identity.FullIdentity,
 
 	{ // setup debug
 		var err error
-		if config.Debug.Address != "" {
-			peer.Debug.Listener, err = net.Listen("tcp", config.Debug.Address)
+		if config.Debug.Addr != "" {
+			peer.Debug.Listener, err = net.Listen("tcp", config.Debug.Addr)
 			if err != nil {
 				withoutStack := errors.New(err.Error())
 				peer.Log.Debug("failed to start debug endpoints", zap.Error(withoutStack))
@@ -141,24 +136,16 @@ func NewRepairer(log *zap.Logger, full *identity.FullIdentity,
 		}
 
 		peer.Dialer = rpc.NewDefaultDialer(tlsOptions)
-	}
-
-	{ // setup mail
-		var err error
-		peer.Mail, err = setupMailService(peer.Log, *config)
-		if err != nil {
-			return nil, errs.Combine(err, peer.Close())
-		}
-
-		peer.Services.Add(lifecycle.Item{
-			Name:  "mail:service",
-			Close: peer.Mail.Close,
-		})
+		peer.Dialer.DialTimeout = config.Repairer.DialTimeout
 	}
 
 	{ // setup overlay
-		var err error
-		peer.Overlay, err = overlay.NewService(log.Named("overlay"), overlayCache, nodeEvents, peer.Mail, config.Console.ExternalAddress, config.Console.SatelliteName, config.Overlay)
+		placement, err := config.Placement.Parse()
+		if err != nil {
+			return nil, err
+		}
+
+		peer.Overlay, err = overlay.NewService(log.Named("overlay"), overlayCache, nodeEvents, placement.CreateFilters, config.Console.ExternalAddress, config.Console.SatelliteName, config.Overlay)
 		if err != nil {
 			return nil, errs.Combine(err, peer.Close())
 		}
@@ -191,22 +178,20 @@ func NewRepairer(log *zap.Logger, full *identity.FullIdentity,
 	}
 
 	{ // setup orders
-		peer.Orders.DB = rollupsWriteCache
-		peer.Orders.Chore = orders.NewChore(log.Named("orders:chore"), rollupsWriteCache, config.Orders)
-		peer.Services.Add(lifecycle.Item{
-			Name:  "orders:chore",
-			Run:   peer.Orders.Chore.Run,
-			Close: peer.Orders.Chore.Close,
-		})
-		peer.Debug.Server.Panel.Add(
-			debug.Cycle("Orders Chore", peer.Orders.Chore.Loop))
+		placement, err := config.Placement.Parse()
+		if err != nil {
+			return nil, err
+		}
 
-		var err error
 		peer.Orders.Service, err = orders.NewService(
 			log.Named("orders"),
 			signing.SignerFromFullIdentity(peer.Identity),
 			peer.Overlay,
-			peer.Orders.DB,
+			// orders service needs DB only for handling
+			// PUT and GET actions which are not used by
+			// repairer so we can set noop implementation.
+			orders.NewNoopDB(),
+			placement.CreateFilters,
 			config.Orders,
 		)
 		if err != nil {
@@ -219,18 +204,29 @@ func NewRepairer(log *zap.Logger, full *identity.FullIdentity,
 			log.Named("reporter"),
 			peer.Reputation,
 			peer.Overlay,
+			metabaseDB,
 			containmentDB,
 			config.Audit.MaxRetriesStatDB,
 			int32(config.Audit.MaxReverifyCount))
 	}
 
 	{ // setup repairer
+		placement, err := config.Placement.Parse()
+		if err != nil {
+			return nil, err
+		}
+
 		peer.EcRepairer = repairer.NewECRepairer(
 			log.Named("ec-repair"),
 			peer.Dialer,
 			signing.SigneeFromPeerIdentity(peer.Identity.PeerIdentity()),
+			config.Repairer.DialTimeout,
 			config.Repairer.DownloadTimeout,
 			config.Repairer.InMemoryRepair)
+
+		if len(config.Repairer.RepairExcludedCountryCodes) == 0 {
+			config.Repairer.RepairExcludedCountryCodes = config.Overlay.RepairExcludedCountryCodes
+		}
 
 		peer.SegmentRepairer = repairer.NewSegmentRepairer(
 			log.Named("segment-repair"),
@@ -239,6 +235,7 @@ func NewRepairer(log *zap.Logger, full *identity.FullIdentity,
 			peer.Overlay,
 			peer.Audit.Reporter,
 			peer.EcRepairer,
+			placement.CreateFilters,
 			config.Checker.RepairOverrides,
 			config.Repairer,
 		)
@@ -251,6 +248,7 @@ func NewRepairer(log *zap.Logger, full *identity.FullIdentity,
 		})
 		peer.Debug.Server.Panel.Add(
 			debug.Cycle("Repair Worker", peer.Repairer.Loop))
+
 	}
 
 	return peer, nil

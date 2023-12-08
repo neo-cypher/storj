@@ -3,36 +3,33 @@
 
 <template>
     <div class="tab-copy">
-        <p class="tab-copy__value" :aria-roledescription="ariaRoleDescription">{{ value }}</p>
+        <p class="tab-copy__value" :title="value" :aria-roledescription="ariaRoleDescription">{{ value }}</p>
         <CopyIcon class="tab-copy__icon" @click="onCopyClick" />
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Prop, Vue } from 'vue-property-decorator';
+<script setup lang="ts">
+import { useNotify } from '@/utils/hooks';
 
 import CopyIcon from '@/../static/images/common/copy.svg';
 
-// @vue/component
-@Component({
-    components: {
-        CopyIcon,
-    },
-})
-export default class TabWithCopy extends Vue {
-    @Prop({ default: '' })
-    public readonly value: string;
-    @Prop({ default: '' })
-    public readonly ariaRoleDescription: string;
+const notify = useNotify();
 
-    /**
-     * Holds on copy button click logic.
-     * Copies command to clipboard.
-     */
-    public onCopyClick(): void {
-        this.$copyText(this.value);
-        this.$notify.success('Command was copied successfully');
-    }
+const props = withDefaults(defineProps<{
+    value: string;
+    ariaRoleDescription: string;
+}>(), {
+    value: '',
+    ariaRoleDescription: '',
+});
+
+/**
+ * Holds on copy button click logic.
+ * Copies command to clipboard.
+ */
+function onCopyClick(): void {
+    navigator.clipboard.writeText(props.value);
+    notify.success('Command was copied successfully');
 }
 </script>
 

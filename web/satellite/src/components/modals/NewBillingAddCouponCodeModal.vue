@@ -14,36 +14,25 @@
     </VModal>
 </template>
 
-<script lang="ts">
-import { Component, Vue } from 'vue-property-decorator';
-
-import { AnalyticsHttpApi } from '@/api/analytics';
+<script setup lang="ts">
 import { AnalyticsEvent } from '@/utils/constants/analyticsEventNames';
-import { APP_STATE_MUTATIONS } from '@/store/mutationConstants';
+import { useAppStore } from '@/store/modules/appStore';
+import { useAnalyticsStore } from '@/store/modules/analyticsStore';
 
 import NewBillingAddCouponCodeInput from '@/components/common/NewBillingAddCouponCodeInput.vue';
 import VModal from '@/components/common/VModal.vue';
 
 import CouponIcon from '@/../static/images/account/billing/greenCoupon.svg';
 
-// @vue/component
-@Component({
-    components: {
-        VModal,
-        NewBillingAddCouponCodeInput,
-        CouponIcon,
-    },
-})
-export default class NewBillingAddCouponCodeModal extends Vue {
-    private readonly analytics: AnalyticsHttpApi = new AnalyticsHttpApi();
+const analyticsStore = useAnalyticsStore();
+const appStore = useAppStore();
 
-    /**
-    * Closes add coupon modal.
-    */
-    public onCloseClick(): void {
-        this.analytics.eventTriggered(AnalyticsEvent.COUPON_CODE_APPLIED);
-        this.$store.commit(APP_STATE_MUTATIONS.TOGGLE_NEW_BILLING_ADD_COUPON_MODAL_SHOWN);
-    }
+/**
+ * Closes add coupon modal.
+ */
+function onCloseClick(): void {
+    analyticsStore.eventTriggered(AnalyticsEvent.COUPON_CODE_APPLIED);
+    appStore.removeActiveModal();
 }
 </script>
 
@@ -53,7 +42,7 @@ export default class NewBillingAddCouponCodeModal extends Vue {
         padding: 32px;
         font-family: 'font_regular', sans-serif;
 
-        @media screen and (max-width: 650px) {
+        @media screen and (width <= 650px) {
             width: unset;
             padding: 24px;
         }

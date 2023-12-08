@@ -3,7 +3,7 @@
 
 <template>
     <div class="value-copy">
-        <p class="value-copy__value" :aria-roledescription="roleDescription">{{ value }}</p>
+        <p class="value-copy__value" :title="value" :aria-roledescription="roleDescription">{{ value }}</p>
         <VButton
             class="value-copy__button"
             label="Copy"
@@ -15,33 +15,30 @@
     </div>
 </template>
 
-<script lang="ts">
-import { Component, Prop, Vue } from 'vue-property-decorator';
+<script setup lang="ts">
+import { useNotify } from '@/utils/hooks';
 
 import VButton from '@/components/common/VButton.vue';
 
-// @vue/component
-@Component({
-    components: {
-        VButton,
-    },
-})
-export default class ValueWithCopy extends Vue {
-    @Prop({ default: '' })
-    public readonly value: string;
-    @Prop({ default: '' })
-    public readonly label: string;
-    @Prop({ default: '' })
-    public readonly roleDescription: string;
+const notify = useNotify();
 
-    /**
-     * Holds on copy button click logic.
-     * Copies value to clipboard.
-     */
-    public onCopyClick(): void {
-        this.$copyText(this.value);
-        this.$notify.success(`${this.label} was copied successfully`);
-    }
+const props = withDefaults(defineProps<{
+    value: string;
+    label: string;
+    roleDescription: string;
+}>(), {
+    value: '',
+    label: '',
+    roleDescription: '',
+});
+
+/**
+ * Holds on copy button click logic.
+ * Copies value to clipboard.
+ */
+function onCopyClick(): void {
+    navigator.clipboard.writeText(props.value);
+    notify.success(`${props.label} was copied successfully`);
 }
 </script>
 
@@ -53,6 +50,11 @@ export default class ValueWithCopy extends Vue {
         background: #eff0f7;
         border-radius: 10px;
         max-width: calc(100% - 50px);
+
+        @media screen and (width <= 450px) {
+            padding: 12px;
+            max-width: calc(100% - 24px);
+        }
 
         &__value {
             font-size: 16px;
@@ -66,6 +68,10 @@ export default class ValueWithCopy extends Vue {
         &__button {
             margin-left: 32px;
             min-width: 66px;
+
+            @media screen and (width <= 450px) {
+                margin-left: 12px;
+            }
         }
     }
 </style>

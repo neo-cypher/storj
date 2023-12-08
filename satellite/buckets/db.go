@@ -7,16 +7,98 @@ import (
 	"context"
 	"time"
 
+	"github.com/zeebo/errs"
+
 	"storj.io/common/macaroon"
+	"storj.io/common/pb"
 	"storj.io/common/storj"
 	"storj.io/common/uuid"
 	"storj.io/storj/satellite/metabase"
 )
 
-// Bucket contains minimal bucket fields for metainfo protocol.
+var (
+	// ErrBucket is an error class for general bucket errors.
+	ErrBucket = errs.Class("bucket")
+
+	// ErrNoBucket is an error class for using empty bucket name.
+	ErrNoBucket = errs.Class("no bucket specified")
+
+	// ErrBucketNotFound is an error class for non-existing bucket.
+	ErrBucketNotFound = errs.Class("bucket not found")
+
+	// ErrBucketAlreadyExists is used to indicate that bucket already exists.
+	ErrBucketAlreadyExists = errs.Class("bucket already exists")
+)
+
+// Bucket contains information about a specific bucket.
 type Bucket struct {
+	ID                          uuid.UUID
+	Name                        string
+	ProjectID                   uuid.UUID
+	UserAgent                   []byte
+	Created                     time.Time
+	PathCipher                  storj.CipherSuite
+	DefaultSegmentsSize         int64
+	DefaultRedundancyScheme     storj.RedundancyScheme
+	DefaultEncryptionParameters storj.EncryptionParameters
+	Placement                   storj.PlacementConstraint
+	Versioning                  Versioning
+}
+
+// ListDirection specifies listing direction.
+type ListDirection = pb.ListDirection
+
+const (
+	// DirectionForward lists forwards from cursor, including cursor.
+	DirectionForward = pb.ListDirection_FORWARD
+	// DirectionAfter lists forwards from cursor, without cursor.
+	DirectionAfter = pb.ListDirection_AFTER
+)
+
+// Versioning represents the versioning state of a bucket.
+type Versioning int
+
+const (
+	// VersioningUnsupported represents a bucket where versioning is not supported.
+	VersioningUnsupported Versioning = 0
+	// Unversioned represents a bucket where versioning has never been enabled.
+	Unversioned Versioning = 1
+	// VersioningEnabled represents a bucket where versioning is enabled.
+	VersioningEnabled Versioning = 2
+	// VersioningSuspended represents a bucket where versioning is currently suspended.
+	VersioningSuspended Versioning = 3
+)
+
+// MinimalBucket contains minimal bucket fields for metainfo protocol.
+type MinimalBucket struct {
 	Name      []byte
 	CreatedAt time.Time
+}
+
+// ListOptions lists objects.
+type ListOptions struct {
+	Cursor    string
+	Direction ListDirection
+	Limit     int
+}
+
+// NextPage returns options for listing the next page.
+func (opts ListOptions) NextPage(list List) ListOptions {
+	if !list.More || len(list.Items) == 0 {
+		return ListOptions{}
+	}
+
+	return ListOptions{
+		Cursor:    list.Items[len(list.Items)-1].Name,
+		Direction: DirectionAfter,
+		Limit:     opts.Limit,
+	}
+}
+
+// List is a list of buckets.
+type List struct {
+	More  bool
+	Items []Bucket
 }
 
 // DB is the interface for the database to interact with buckets.
@@ -24,23 +106,29 @@ type Bucket struct {
 // architecture: Database
 type DB interface {
 	// CreateBucket creates a new bucket
-	CreateBucket(ctx context.Context, bucket storj.Bucket) (_ storj.Bucket, err error)
+	CreateBucket(ctx context.Context, bucket Bucket) (_ Bucket, err error)
 	// GetBucket returns an existing bucket
-	GetBucket(ctx context.Context, bucketName []byte, projectID uuid.UUID) (bucket storj.Bucket, err error)
+	GetBucket(ctx context.Context, bucketName []byte, projectID uuid.UUID) (bucket Bucket, err error)
 	// GetBucketPlacement returns with the placement constraint identifier.
 	GetBucketPlacement(ctx context.Context, bucketName []byte, projectID uuid.UUID) (placement storj.PlacementConstraint, err error)
+	// GetBucketVersioningState returns with the versioning state of the bucket.
+	GetBucketVersioningState(ctx context.Context, bucketName []byte, projectID uuid.UUID) (versioningState Versioning, err error)
+	// EnableBucketVersioning enables versioning for a bucket.
+	EnableBucketVersioning(ctx context.Context, bucketName []byte, projectID uuid.UUID) error
+	// SuspendBucketVersioning suspends versioning for a bucket.
+	SuspendBucketVersioning(ctx context.Context, bucketName []byte, projectID uuid.UUID) error
 	// GetMinimalBucket returns existing bucket with minimal number of fields.
-	GetMinimalBucket(ctx context.Context, bucketName []byte, projectID uuid.UUID) (bucket Bucket, err error)
+	GetMinimalBucket(ctx context.Context, bucketName []byte, projectID uuid.UUID) (bucket MinimalBucket, err error)
 	// HasBucket returns if a bucket exists.
 	HasBucket(ctx context.Context, bucketName []byte, projectID uuid.UUID) (exists bool, err error)
-	// GetBucketID returns an existing bucket id.
-	GetBucketID(ctx context.Context, bucket metabase.BucketLocation) (id uuid.UUID, err error)
 	// UpdateBucket updates an existing bucket
-	UpdateBucket(ctx context.Context, bucket storj.Bucket) (_ storj.Bucket, err error)
+	UpdateBucket(ctx context.Context, bucket Bucket) (_ Bucket, err error)
+	// UpdateUserAgent updates buckets user agent.
+	UpdateUserAgent(ctx context.Context, projectID uuid.UUID, bucketName string, userAgent []byte) error
 	// DeleteBucket deletes a bucket
 	DeleteBucket(ctx context.Context, bucketName []byte, projectID uuid.UUID) (err error)
 	// ListBuckets returns all buckets for a project
-	ListBuckets(ctx context.Context, projectID uuid.UUID, listOpts storj.BucketListOptions, allowedBuckets macaroon.AllowedBuckets) (bucketList storj.BucketList, err error)
+	ListBuckets(ctx context.Context, projectID uuid.UUID, listOpts ListOptions, allowedBuckets macaroon.AllowedBuckets) (bucketList List, err error)
 	// CountBuckets returns the number of buckets a project currently has
 	CountBuckets(ctx context.Context, projectID uuid.UUID) (int, error)
 	// IterateBucketLocations iterates through all buckets from some point with limit.
