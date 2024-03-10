@@ -25,11 +25,14 @@ Requires setting `Authorization` header for requests.
             * [DELETE /api/users/{user-email}/violation-freeze](#delete-apiusersuser-emailviolation-freeze)
             * [PUT /api/users/{user-email}/legal-freeze](#put-apiusersuser-emaillegal-freeze)
             * [DELETE /api/users/{user-email}/legal-freeze](#delete-apiusersuser-emaillegal-freeze)
+            * [PUT /api/users/{user-email}/trial-expiration-freeze](#put-apiusersuser-emailtrial-expiration-freeze)
+            * [DELETE /api/users/{user-email}/trial-expiration-freeze](#delete-apiusersuser-emailtrial-expiration-freeze)
             * [DELETE /api/users/{user-email}/billing-warning](#delete-apiusersuser-emailbilling-warning)
             * [GET /api/users/pending-deletion](#get-apiuserspending-deletion)
             * [PATCH /api/users/{user-email}/geofence](#patch-apiusersuser-emailgeofence)
             * [DELETE /api/users/{user-email}/geofence](#delete-apiusersuser-emailgeofence)
             * [PATCH /api/users/{user-email}/activate-account/disable-bot-restriction](#patch-apiusersuser-emailactivate-accountdisable-bot-restriction)
+            * [PATCH /api/users/{user-email}/trial-expiration](#patch-apiusersuser-emailtrial-expiration)
         * [OAuth Client Management](#oauth-client-management)
             * [POST /api/oauth/clients](#post-apioauthclients)
             * [PUT /api/oauth/clients/{id}](#put-apioauthclientsid)
@@ -45,20 +48,23 @@ Requires setting `Authorization` header for requests.
             * [GET /api/projects/{project-id}/usage](#get-apiprojectsproject-idusage)
             * [GET /api/projects/{project-id}/limit](#get-apiprojectsproject-idlimit)
             * [Update limits](#update-limits)
-                * [POST /api/projects/{project-id}/limit?usage={value}](#post-apiprojectsproject-idlimitusagevalue)
-                * [POST /api/projects/{project-id}/limit?bandwidth={value}](#post-apiprojectsproject-idlimitbandwidthvalue)
-                * [POST /api/projects/{project-id}/limit?rate={value}](#post-apiprojectsproject-idlimitratevalue)
-                * [POST /api/projects/{project-id}/limit?buckets={value}](#post-apiprojectsproject-idlimitbucketsvalue)
-                * [POST /api/projects/{project-id}/limit?burst={value}](#post-apiprojectsproject-idlimitburstvalue)
-                * [POST /api/projects/{project-id}/limit?segments={value}](#post-apiprojectsproject-idlimitsegmentsvalue)
+                * [PUT /api/projects/{project-id}/limit?usage={value}](#put-apiprojectsproject-idlimitusagevalue)
+                * [PUT /api/projects/{project-id}/limit?bandwidth={value}](#put-apiprojectsproject-idlimitbandwidthvalue)
+                * [PUT /api/projects/{project-id}/limit?rate={value}](#put-apiprojectsproject-idlimitratevalue)
+                * [PUT /api/projects/{project-id}/limit?buckets={value}](#put-apiprojectsproject-idlimitbucketsvalue)
+                * [PUT /api/projects/{project-id}/limit?burst={value}](#put-apiprojectsproject-idlimitburstvalue)
+                * [PUT /api/projects/{project-id}/limit?segments={value}](#put-apiprojectsproject-idlimitsegmentsvalue)
         * [Bucket Management](#bucket-management)
             * [GET /api/projects/{project-id}/buckets/{bucket-name}](#get-apiprojectsproject-idbucketsbucket-name)
             * [Geofencing](#geofencing)
                 * [POST /api/projects/{project-id}/buckets/{bucket-name}/geofence?region={value}](#post-apiprojectsproject-idbucketsbucket-namegeofenceregionvalue)
                 * [DELETE /api/projects/{project-id}/buckets/{bucket-name}/geofence](#delete-apiprojectsproject-idbucketsbucket-namegeofence)
-        * [APIKey Management](#apikey-management)
-            * [GET /api/apikeys/{apikey}](#get-apiapikeysapikey)
-            * [DELETE /api/apikeys/{apikey}](#delete-apiapikeysapikey)
+        * [Project API Keys Management](#project-api-keys-management)
+            * [GET /api/apikeys/{api-key}](#get-apiapikeysapi-key)
+            * [DELETE /api/apikeys/{api-key}](#delete-apiapikeysapi-key)
+        * [REST API Keys Management](#rest-api-keys-management)
+            * [POST /api/restkeys/{user-email}](#post-apirestkeysuser-email)
+            * [PUT /api/restkeys/{api-key}/revoke](#put-apirestkeysapi-keyrevoke)
 
 <!-- tocstop -->
 
@@ -156,6 +162,7 @@ A successful response body:
     "projects":[
         {
             "id": "abcabcab-1234-abcd-abcd-abecdefedcab",
+            "publicId": "9551ffef-935c-4d62-9a3b-00d36c411182",
             "name": "Project",
             "description": "Project to store data.",
             "ownerId": "12345678-1234-1234-1234-123456789abc"
@@ -209,6 +216,15 @@ User status is also set to Legal hold. The user cannot exit this state automatic
 Removes the legal freeze on a user account so uploads and downloads may resume.
 User status is set back to Active. This is the only way to exit the legal frozen state.
 
+#### PUT /api/users/{user-email}/trial-expiration-freeze
+
+Freezes a user account for trial expiration. In this state, the user cannot upload or download data.
+The user can exit this state when they upgrade to a paid tier.
+
+#### DELETE /api/users/{user-email}/trial-expiration-freeze
+
+Removes the trial expiration freeze on a user account, reinstating account limits.
+
 
 #### DELETE /api/users/{user-email}/billing-warning
 
@@ -238,7 +254,27 @@ Removes the account level geofence for the user.
 
 #### PATCH /api/users/{user-email}/activate-account/disable-bot-restriction
 
-Disables account bot restriction by activating it. Used only for accounts with PendingBotVerification status.
+Disables account bot restrictions by activating the account and restoring its limit values. This is used only for accounts with the PendingBotVerification status.
+
+#### PATCH /api/users/{user-email}/trial-expiration
+
+Updates account free trial expiration date.
+
+Example request:
+
+```json
+{
+  "trialExpiration": "2024-06-01T00:00:00.000Z"
+}
+```
+
+or
+
+```json
+{
+  "trialExpiration": null
+}
+```
 
 ### OAuth Client Management
 
@@ -406,29 +442,43 @@ A successful response body:
 #### Update limits
 
 You can update the different limits with one single request just adding the
-various query parameters (e.g. `usage=5000000&bandwidth=9000000`)
+various query parameters (e.g. `usage=5000000&bandwidth=9000000`).
 
-##### POST /api/projects/{project-id}/limit?usage={value}
+This endpoint also accepts to receive the information as a form in the request body, that is content
+type `application/x-www-form-urlencoded` and the header must be specified, otherwise the server
+doesn't read the request body.
+
+Using the 0 number means to set them exactly to 0, which is not the same than using the default
+value. Default values are applied when they are `nil`. Only the indicated fields support to set the
+default value to `nil` using the -1 number.
+
+##### PUT /api/projects/{project-id}/limit?usage={value}
 
 Updates usage limit for a project. The value must be in bytes.
 
-##### POST /api/projects/{project-id}/limit?bandwidth={value}
+##### PUT /api/projects/{project-id}/limit?bandwidth={value}
 
 Updates bandwidth limit for a project. The value must be in bytes.
 
-##### POST /api/projects/{project-id}/limit?rate={value}
+##### PUT /api/projects/{project-id}/limit?rate={value}
 
 Updates rate limit for a project.
 
-##### POST /api/projects/{project-id}/limit?buckets={value}
+Accepts -1 to set to `nil`.
+
+##### PUT /api/projects/{project-id}/limit?buckets={value}
 
 Updates number of buckets limit for a project.
 
-##### POST /api/projects/{project-id}/limit?burst={value}
+Accepts -1 to set to `nil`.
+
+##### PUT /api/projects/{project-id}/limit?burst={value}
 
 Updates burst limit for a project.
 
-##### POST /api/projects/{project-id}/limit?segments={value}
+Accepts -1 to set to `nil`.
+
+##### PUT /api/projects/{project-id}/limit?segments={value}
 
 Updates number of segments limit for a project.
 
@@ -462,11 +512,11 @@ values for the `region` parameter are:
 
 Removes the geofencing configuration for the specified bucket. The bucket MUST be empty in order for this to work.
 
-### APIKey Management
+### Project API Keys Management
 
-#### GET /api/apikeys/{apikey}
+#### GET /api/apikeys/{api-key}
 
-Gets information on the given apikey.
+Gets information on the given API key.
 
 A successful response body:
 
@@ -490,6 +540,27 @@ A successful response body:
 }
 ```
 
-#### DELETE /api/apikeys/{apikey}
+#### DELETE /api/apikeys/{api-key}
 
-Deletes the given apikey.
+Deletes the given API key.
+
+### REST API Keys Management
+
+#### POST /api/restkeys/{user-email}
+
+Create a REST API key for the user's account associated to the indicated e-mail.
+
+An example of a required request body:
+
+```json
+{
+    "expiration": "30d20h"
+}
+```
+
+If `expiration` is empty, the default expiration is applied. Otherwise, the expiration parameter
+must have some non-negative value according to https://pkg.go.dev/time#ParseDuration.
+
+#### PUT /api/restkeys/{api-key}/revoke
+
+Revoke the indicated REST API key.

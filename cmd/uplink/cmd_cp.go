@@ -372,6 +372,9 @@ func (c *cmdCp) copyFile(ctx context.Context, fs ulfs.Filesystem, source, dest u
 	}
 
 	if dest.Remote() && source.Remote() {
+		if !c.expires.IsZero() {
+			return errs.New("expiration time cannot be changed with server-side copy")
+		}
 		return fs.Copy(ctx, source, dest)
 	}
 
@@ -386,46 +389,106 @@ func (c *cmdCp) copyFile(ctx context.Context, fs ulfs.Filesystem, source, dest u
 	}
 	defer func() { _ = mrh.Close() }()
 
+	cfg, err := c.calculatePartSize(mrh.Length(), c.parallelismChunkSize.Int64(), c.parallelism)
+	if err != nil {
+		return err
+	}
+
 	mwh, err := fs.Create(ctx, dest, &ulfs.CreateOptions{
-		Expires:  c.expires,
-		Metadata: c.metadata,
+		Expires:    c.expires,
+		Metadata:   c.metadata,
+		SinglePart: cfg.singlePart,
 	})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = mwh.Abort(ctx) }()
 
-	partSize, err := c.calculatePartSize(mrh.Length(), c.parallelismChunkSize.Int64())
-	if err != nil {
-		return err
-	}
-
 	return errs.Wrap(c.parallelCopy(
 		ctx,
 		source, dest,
 		mrh, mwh,
-		c.parallelism, partSize,
+		cfg.parallelism, cfg.partSize,
 		offset, length,
 		bar,
 	))
 }
 
+type partSizeConfig struct {
+	partSize    int64
+	singlePart  bool
+	parallelism int
+}
+
 // calculatePartSize returns the needed part size in order to upload the file with size of 'length'.
 // It hereby respects if the client requests/prefers a certain size and only increases if needed.
-func (c *cmdCp) calculatePartSize(length, preferredSize int64) (requiredSize int64, err error) {
-	segC := (length / maxPartCount / memory.GiB.Int64()) + 1
-	requiredSize = segC * memory.GiB.Int64()
-	switch {
-	case preferredSize == 0:
-		return requiredSize, nil
-	case requiredSize <= preferredSize:
-		return preferredSize, nil
-	case length < 0: // let the user pick their size if we don't have a length to know better
-		return preferredSize, nil
-	default:
-		return 0, errs.New(fmt.Sprintf("the specified chunk size %s is too small, requires %s or larger",
-			memory.FormatBytes(preferredSize), memory.FormatBytes(requiredSize)))
+func (c *cmdCp) calculatePartSize(contentLength, preferredPartSize int64, parallelism int) (cfg partSizeConfig, err error) {
+	const minimumPartSize = memory.GiB
+	const alignPartSize = 64 * memory.MiB
+
+	// Let the user pick their size if we don't have a contentLength to know better.
+	if contentLength < 0 {
+		partSize := preferredPartSize
+
+		if partSize <= 0 { // user didn't pick a size
+			partSize = minimumPartSize.Int64()
+		}
+
+		partSize = roundUpToNext(partSize, alignPartSize.Int64())
+
+		return partSizeConfig{
+			partSize:    partSize,
+			singlePart:  false,
+			parallelism: parallelism,
+		}, nil
 	}
+
+	// When we are not parallel, there's no point in doing multipart upload.
+	if parallelism <= 1 {
+		return partSizeConfig{
+			partSize:    contentLength,
+			singlePart:  true,
+			parallelism: 1,
+		}, nil
+	}
+
+	// ceil(contentLength / maxPartCount)
+	smallestAllowedPartSize := (contentLength + (maxPartCount - 1)) / maxPartCount
+
+	// Calculate a good part size.
+	partSize := roundUpToNext(smallestAllowedPartSize, alignPartSize.Int64())
+
+	// Let's set a lower limit for the expected part size.
+	if partSize < minimumPartSize.Int64() {
+		partSize = minimumPartSize.Int64()
+	}
+
+	// check whether we can use preferred part size instead?
+	if preferredPartSize > 0 {
+		if preferredPartSize < partSize {
+			return cfg, errs.New(fmt.Sprintf("the specified chunk size %s is too small, requires %s or larger",
+				memory.FormatBytes(preferredPartSize), memory.FormatBytes(partSize)))
+		}
+
+		partSize = roundUpToNext(preferredPartSize, alignPartSize.Int64())
+	}
+
+	cfg = partSizeConfig{
+		partSize:    partSize,
+		singlePart:  contentLength <= partSize,
+		parallelism: parallelism,
+	}
+
+	// if there's a single part there's no point in allowing parallelism.
+	if cfg.singlePart {
+		cfg.parallelism = 1
+	}
+
+	return cfg, nil
+}
+
+func roundUpToNext(v, r int64) int64 {
+	return ((v + (r - 1)) / r) * r
 }
 
 func copyVerbing(source, dest ulloc.Location) (verb string) {

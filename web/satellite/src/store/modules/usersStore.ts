@@ -2,10 +2,12 @@
 // See LICENSE for copying information.
 
 import { defineStore } from 'pinia';
-import { computed, reactive, readonly } from 'vue';
+import { computed, DeepReadonly, reactive, readonly } from 'vue';
 
 import {
+    ACCOUNT_SETUP_STEPS,
     DisableMFARequest,
+    OnboardingStep,
     SetUserSettingsData,
     UpdatedUser,
     User,
@@ -19,7 +21,7 @@ export const DEFAULT_USER_SETTINGS = readonly(new UserSettings());
 
 export class UsersState {
     public user: User = new User();
-    public settings: Readonly<UserSettings> = DEFAULT_USER_SETTINGS;
+    public settings: DeepReadonly<UserSettings> = DEFAULT_USER_SETTINGS;
     public userMFASecret = '';
     public userMFARecoveryCodes: string[] = [];
 }
@@ -34,6 +36,8 @@ export const useUsersStore = defineStore('users', () => {
     const shouldOnboard = computed(() => {
         return !state.settings.onboardingStart || (state.settings.onboardingStart && !state.settings.onboardingEnd);
     });
+
+    const noticeDismissal = computed(() => state.settings.noticeDismissal);
 
     const api: UsersApi = new AuthHttpApi();
 
@@ -52,6 +56,18 @@ export const useUsersStore = defineStore('users', () => {
         user.projectLimit ||= configStore.state.config.defaultProjectLimit;
 
         setUser(user);
+    }
+
+    function getShouldPromptPassphrase(isOwner: boolean): boolean {
+        const settings = state.settings;
+        const step = settings.onboardingStep as OnboardingStep || OnboardingStep.AccountTypeSelection;
+        if (settings.onboardingEnd || !settings.passphrasePrompt) {
+            return settings.passphrasePrompt;
+        }
+        if (!isOwner) {
+            return !ACCOUNT_SETUP_STEPS.includes(step);
+        }
+        return step !== OnboardingStep.EncryptionPassphrase && !ACCOUNT_SETUP_STEPS.includes(step);
     }
 
     async function disableUserMFA(request: DisableMFARequest): Promise<void> {
@@ -114,6 +130,7 @@ export const useUsersStore = defineStore('users', () => {
         state,
         userName,
         shouldOnboard,
+        noticeDismissal,
         updateUser,
         getUser,
         disableUserMFA,
@@ -121,6 +138,7 @@ export const useUsersStore = defineStore('users', () => {
         generateUserMFASecret,
         generateUserMFARecoveryCodes,
         regenerateUserMFARecoveryCodes,
+        getShouldPromptPassphrase,
         clear,
         login,
         setUser,

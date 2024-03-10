@@ -7,8 +7,8 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
+	"storj.io/common/cfgstruct"
 	"storj.io/common/fpath"
-	"storj.io/private/cfgstruct"
 	"storj.io/storj/cmd/storagenode/internalcmd"
 	"storj.io/storj/storagenode"
 )
@@ -60,9 +60,11 @@ func newRootCmd(setDefaults bool) (*cobra.Command, *Factory) {
 		newGracefulExitInitCmd(factory),
 		newGracefulExitStatusCmd(factory),
 		newForgetSatelliteCmd(factory),
+		newForgetSatelliteStatusCmd(factory),
 		// internal hidden commands
 		internalcmd.NewUsedSpaceFilewalkerCmd().Command,
 		internalcmd.NewGCFilewalkerCmd().Command,
+		internalcmd.NewTrashFilewalkerCmd().Command,
 	)
 
 	return cmd, factory

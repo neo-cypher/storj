@@ -561,7 +561,7 @@ func TestService_InvoiceUserWithManyProjects(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		err = payments.StripeService.CreateInvoices(ctx, period)
+		err = payments.StripeService.CreateInvoices(ctx, period, false)
 		require.NoError(t, err)
 
 		// invoice wasn't created because user is deactivated
@@ -574,7 +574,7 @@ func TestService_InvoiceUserWithManyProjects(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		err = payments.StripeService.CreateInvoices(ctx, period)
+		err = payments.StripeService.CreateInvoices(ctx, period, false)
 		require.NoError(t, err)
 
 		// invoice was created because user is active
@@ -883,7 +883,7 @@ func TestService_PayInvoiceFromTokenBalance(t *testing.T) {
 			UserID:      userID,
 			Amount:      tokenBalance,
 			Description: "token payment credit",
-			Source:      billing.StorjScanSource,
+			Source:      billing.StorjScanEthereumSource,
 			Status:      billing.TransactionStatusCompleted,
 			Type:        billing.TransactionTypeCredit,
 			Metadata:    nil,
@@ -985,7 +985,7 @@ func TestService_PayMultipleInvoiceFromTokenBalance(t *testing.T) {
 			UserID:      userID,
 			Amount:      currency.AmountFromBaseUnits(300, currency.USDollars),
 			Description: "token payment credit",
-			Source:      billing.StorjScanSource,
+			Source:      billing.StorjScanEthereumSource,
 			Status:      billing.TransactionStatusCompleted,
 			Type:        billing.TransactionTypeCredit,
 			Metadata:    nil,
@@ -1093,7 +1093,7 @@ func TestService_PayMultipleInvoiceForCustomer(t *testing.T) {
 			UserID:      userID,
 			Amount:      currency.AmountFromBaseUnits(300, currency.USDollars),
 			Description: "token payment credit",
-			Source:      billing.StorjScanSource,
+			Source:      billing.StorjScanEthereumSource,
 			Status:      billing.TransactionStatusCompleted,
 			Type:        billing.TransactionTypeCredit,
 			Metadata:    nil,
@@ -1214,7 +1214,7 @@ func TestFailPendingInvoicePayment(t *testing.T) {
 			UserID:      userID,
 			Amount:      tokenBalance,
 			Description: "token payment credit",
-			Source:      billing.StorjScanSource,
+			Source:      billing.StorjScanEthereumSource,
 			Status:      billing.TransactionStatusCompleted,
 			Type:        billing.TransactionTypeCredit,
 			Metadata:    nil,
@@ -1318,7 +1318,7 @@ func TestService_GenerateInvoice(t *testing.T) {
 						99)
 				}
 
-				require.NoError(t, payments.StripeService.GenerateInvoices(ctx, start, false))
+				require.NoError(t, payments.StripeService.GenerateInvoices(ctx, start, false, false))
 
 				// ensure project record was generated
 				err = satellite.DB.StripeCoinPayments().ProjectRecords().Check(ctx, proj.ID, start, end)

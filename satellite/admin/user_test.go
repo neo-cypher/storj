@@ -4,19 +4,24 @@
 package admin_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 
 	"storj.io/common/memory"
 	"storj.io/common/storj"
 	"storj.io/common/testcontext"
+	"storj.io/common/testrand"
+	"storj.io/common/uuid"
 	"storj.io/storj/private/testplanet"
 	"storj.io/storj/satellite"
 	"storj.io/storj/satellite/console"
@@ -37,18 +42,42 @@ func TestUserGet(t *testing.T) {
 		address := sat.Admin.Admin.Listener.Addr()
 		project := planet.Uplinks[0].Projects[0]
 
+		user, err := sat.DB.Console().Users().Get(ctx, project.Owner.ID)
+		require.NoError(t, err)
+
 		projLimit, err := sat.DB.Console().Users().GetProjectLimit(ctx, project.Owner.ID)
 		require.NoError(t, err)
 
 		link := "http://" + address.String() + "/api/users/" + project.Owner.Email
 		expectedBody := `{` +
-			fmt.Sprintf(`"user":{"id":"%s","fullName":"User uplink0_0","email":"%s","projectLimit":%d,"placement":%d},`, project.Owner.ID, project.Owner.Email, projLimit, storj.DefaultPlacement) +
-			fmt.Sprintf(`"projects":[{"id":"%s","name":"uplink0_0","description":"","ownerId":"%s"}]}`, project.ID, project.Owner.ID)
+			fmt.Sprintf(
+				`"user":{"id":"%s","fullName":"User uplink0_0","email":"%s","projectLimit":%d,"placement":%d,"paidTier":%t},`,
+				project.Owner.ID,
+				project.Owner.Email,
+				projLimit,
+				storj.DefaultPlacement,
+				user.PaidTier,
+			) +
+			fmt.Sprintf(
+				`"projects":[{"id":"%s","publicId":"%s","name":"uplink0_0","description":"","ownerId":"%s"}]}`,
+				project.ID,
+				project.PublicID,
+				project.Owner.ID,
+			)
 
 		assertReq(ctx, t, link, http.MethodGet, "", http.StatusOK, expectedBody, planet.Satellites[0].Config.Console.AuthToken)
 
 		link = "http://" + address.String() + "/api/users/" + "user-not-exist@not-exist.test"
-		body := assertReq(ctx, t, link, http.MethodGet, "", http.StatusNotFound, "", planet.Satellites[0].Config.Console.AuthToken)
+		body := assertReq(
+			ctx,
+			t,
+			link,
+			http.MethodGet,
+			"",
+			http.StatusNotFound,
+			"",
+			planet.Satellites[0].Config.Console.AuthToken,
+		)
 		require.Contains(t, string(body), "does not exist")
 	})
 }
@@ -67,7 +96,7 @@ func TestUserAdd(t *testing.T) {
 		address := planet.Satellites[0].Admin.Admin.Listener.Addr()
 		email := "alice+2@mail.test"
 
-		body := strings.NewReader(fmt.Sprintf(`{"email":"%s","fullName":"Alice Test","password":"123a123"}`, email))
+		body := strings.NewReader(fmt.Sprintf(`{"email":"%s","fullName":"Alice Test","password":"password"}`, email))
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+address.String()+"/api/users", body)
 		require.NoError(t, err)
 		req.Header.Set("Authorization", planet.Satellites[0].Config.Console.AuthToken)
@@ -106,7 +135,7 @@ func TestUserAdd_sameEmail(t *testing.T) {
 		address := planet.Satellites[0].Admin.Admin.Listener.Addr()
 		email := "alice+2@mail.test"
 
-		body := strings.NewReader(fmt.Sprintf(`{"email":"%s","fullName":"Alice Test","password":"123a123"}`, email))
+		body := strings.NewReader(fmt.Sprintf(`{"email":"%s","fullName":"Alice Test","password":"password"}`, email))
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+address.String()+"/api/users", body)
 		require.NoError(t, err)
 		req.Header.Set("Authorization", planet.Satellites[0].Config.Console.AuthToken)
@@ -130,7 +159,7 @@ func TestUserAdd_sameEmail(t *testing.T) {
 		require.Equal(t, email, user.Email)
 
 		// Add same user again, this should fail
-		body = strings.NewReader(fmt.Sprintf(`{"email":"%s","fullName":"Alice Test","password":"123a123"}`, email))
+		body = strings.NewReader(fmt.Sprintf(`{"email":"%s","fullName":"Alice Test","password":"password"}`, email))
 		req, err = http.NewRequestWithContext(ctx, http.MethodPost, "http://"+address.String()+"/api/users", body)
 		require.NoError(t, err)
 		req.Header.Set("Authorization", planet.Satellites[0].Config.Console.AuthToken)
@@ -189,6 +218,11 @@ func TestUserUpdate(t *testing.T) {
 			require.Equal(t, updatedUser.Status, updatedUserProjectLimit.Status)
 			require.Equal(t, newLimit, updatedUserProjectLimit.ProjectLimit)
 
+			now := time.Now()
+			planet.Satellites[0].Admin.Admin.Server.SetNow(func() time.Time {
+				return now
+			})
+
 			// Update paid tier status and usage.
 			link = "http://" + address.String() + "/api/users/alice+2@mail.test"
 			newUsageLimit := int64(1000)
@@ -205,6 +239,7 @@ func TestUserUpdate(t *testing.T) {
 			require.Equal(t, newUsageLimit, updatedUserStatusAndUsageLimits.ProjectStorageLimit)
 			require.Equal(t, newUsageLimit, updatedUserStatusAndUsageLimits.ProjectBandwidthLimit)
 			require.Equal(t, newUsageLimit, updatedUserStatusAndUsageLimits.ProjectSegmentLimit)
+			require.WithinDuration(t, now, *updatedUserStatusAndUsageLimits.UpgradeTime, time.Minute)
 
 			var updateLimitsTests = []struct {
 				newStorageLimit   memory.Size
@@ -369,6 +404,53 @@ func TestDisableMFA(t *testing.T) {
 	})
 }
 
+func TestUpdateTrialExpiration(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount:   1,
+		StorageNodeCount: 0,
+		UplinkCount:      1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(_ *zap.Logger, _ int, config *satellite.Config) {
+				config.Admin.Address = "127.0.0.1:0"
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		db := planet.Satellites[0].DB
+		address := planet.Satellites[0].Admin.Admin.Listener.Addr()
+		project := planet.Uplinks[0].Projects[0]
+
+		newExpirationDate := time.Now().UTC().Add(5 * 24 * time.Hour)
+
+		body := strings.NewReader(fmt.Sprintf(`{"trialExpiration":"%s"}`, newExpirationDate.Format(time.RFC3339Nano)))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPatch, fmt.Sprintf("http://"+address.String()+"/api/users/%s/trial-expiration", project.Owner.Email), body)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", planet.Satellites[0].Config.Console.AuthToken)
+
+		response, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		require.NoError(t, response.Body.Close())
+
+		updatedUser, err := db.Console().Users().Get(ctx, project.Owner.ID)
+		require.NoError(t, err)
+		require.WithinDuration(t, newExpirationDate, *updatedUser.TrialExpiration, time.Minute)
+
+		body = strings.NewReader(`{"trialExpiration":null}`)
+		req, err = http.NewRequestWithContext(ctx, http.MethodPatch, fmt.Sprintf("http://"+address.String()+"/api/users/%s/trial-expiration", project.Owner.Email), body)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", planet.Satellites[0].Config.Console.AuthToken)
+
+		response, err = http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		require.NoError(t, response.Body.Close())
+
+		updatedUser, err = db.Console().Users().Get(ctx, project.Owner.ID)
+		require.NoError(t, err)
+		require.Nil(t, updatedUser.TrialExpiration)
+	})
+}
+
 func TestDisableBotRestriction(t *testing.T) {
 	testplanet.Run(t, testplanet.Config{
 		SatelliteCount:   1,
@@ -380,29 +462,71 @@ func TestDisableBotRestriction(t *testing.T) {
 			},
 		},
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
-		address := planet.Satellites[0].Admin.Admin.Listener.Addr()
-		user, err := planet.Satellites[0].DB.Console().Users().GetByEmail(ctx, planet.Uplinks[0].Projects[0].Owner.Email)
+		sat := planet.Satellites[0]
+		consoleDB := sat.DB.Console()
+		address := sat.Admin.Admin.Listener.Addr()
+		user, err := consoleDB.Users().GetByEmail(ctx, planet.Uplinks[0].Projects[0].Owner.Email)
 		require.NoError(t, err)
 
 		// Error on try set active status for a user with non-PendingBotVerification status.
 		link := fmt.Sprintf("http://"+address.String()+"/api/users/%s/activate-account/disable-bot-restriction", user.Email)
 		expectedBody := fmt.Sprintf("{\"error\":\"user with email \\\"%s\\\" must have PendingBotVerification status to disable bot restriction\",\"detail\":\"\"}", user.Email)
-		body := assertReq(ctx, t, link, http.MethodPatch, "", http.StatusBadRequest, expectedBody, planet.Satellites[0].Config.Console.AuthToken)
+		body := assertReq(ctx, t, link, http.MethodPatch, "", http.StatusBadRequest, expectedBody, sat.Config.Console.AuthToken)
 		require.NotZero(t, len(body))
 
-		// Set user status to not active.
+		// Update user status to pending bot verification and set zero limits.
+		zeroLimit := int64(0)
 		botStatus := console.PendingBotVerification
-		err = planet.Satellites[0].DB.Console().Users().Update(ctx, user.ID, console.UpdateUserRequest{Status: &botStatus})
+		err = consoleDB.Users().Update(ctx, user.ID, console.UpdateUserRequest{
+			Status:                &botStatus,
+			ProjectStorageLimit:   &zeroLimit,
+			ProjectBandwidthLimit: &zeroLimit,
+			ProjectSegmentLimit:   &zeroLimit,
+		})
 		require.NoError(t, err)
 
-		// Set user status back to active.
-		body = assertReq(ctx, t, link, http.MethodPatch, "", http.StatusOK, "", planet.Satellites[0].Config.Console.AuthToken)
+		// Error on try unfreeze user without BotFreeze event set.
+		expectedBody = "{\"error\":\"failed to unfreeze bot user\",\"detail\":\"account freeze service: this freeze event does not exist for this user\"}"
+		body = assertReq(ctx, t, link, http.MethodPatch, "", http.StatusConflict, expectedBody, sat.Config.Console.AuthToken)
+		require.NotZero(t, len(body))
+
+		// Prepare BotFreeze event.
+		initUserLimits := console.UsageLimits{
+			Storage:   user.ProjectStorageLimit,
+			Bandwidth: user.ProjectBandwidthLimit,
+			Segment:   user.ProjectSegmentLimit,
+		}
+		limits := &console.AccountFreezeEventLimits{
+			User:     initUserLimits,
+			Projects: make(map[uuid.UUID]console.UsageLimits),
+		}
+		botFreeze := &console.AccountFreezeEvent{
+			UserID: user.ID,
+			Type:   console.BotFreeze,
+			Limits: limits,
+		}
+
+		// Insert BotFreeze event.
+		_, err = consoleDB.AccountFreezeEvents().Upsert(ctx, botFreeze)
+		require.NoError(t, err)
+
+		// Restore user status and limits.
+		body = assertReq(ctx, t, link, http.MethodPatch, "", http.StatusOK, "", sat.Config.Console.AuthToken)
 		require.Len(t, body, 0)
 
 		// Ensure status is updated.
-		updatedUser, err := planet.Satellites[0].DB.Console().Users().Get(ctx, user.ID)
+		updatedUser, err := consoleDB.Users().Get(ctx, user.ID)
 		require.NoError(t, err)
 		require.Equal(t, console.Active, updatedUser.Status)
+		require.Equal(t, user.ProjectStorageLimit, updatedUser.ProjectStorageLimit)
+		require.Equal(t, user.ProjectBandwidthLimit, updatedUser.ProjectBandwidthLimit)
+		require.Equal(t, user.ProjectSegmentLimit, updatedUser.ProjectSegmentLimit)
+
+		// BotFreeze event no longer exists.
+		event, err := consoleDB.AccountFreezeEvents().Get(ctx, user.ID, console.BotFreeze)
+		require.Error(t, err)
+		require.True(t, errs.Is(err, sql.ErrNoRows))
+		require.Nil(t, event)
 	})
 }
 
@@ -590,6 +714,80 @@ func TestLegalFreezeUnfreezeUser(t *testing.T) {
 	})
 }
 
+func TestTrialExpirationFreezeUnfreezeUser(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount:   1,
+		StorageNodeCount: 0,
+		UplinkCount:      1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: func(_ *zap.Logger, _ int, config *satellite.Config) {
+				config.Admin.Address = "127.0.0.1:0"
+			},
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		address := planet.Satellites[0].Admin.Admin.Listener.Addr()
+		userPreFreeze, err := planet.Satellites[0].DB.Console().Users().Get(ctx, planet.Uplinks[0].Projects[0].Owner.ID)
+		require.NoError(t, err)
+		require.Equal(t, console.Active, userPreFreeze.Status)
+		require.NotZero(t, userPreFreeze.ProjectStorageLimit)
+		require.NotZero(t, userPreFreeze.ProjectBandwidthLimit)
+
+		burstRateLimit := 1000
+		err = planet.Satellites[0].DB.Console().Projects().UpdateBurstLimit(ctx, planet.Uplinks[0].Projects[0].ID, &burstRateLimit)
+		require.NoError(t, err)
+		err = planet.Satellites[0].DB.Console().Projects().UpdateRateLimit(ctx, planet.Uplinks[0].Projects[0].ID, &burstRateLimit)
+		require.NoError(t, err)
+
+		projectPreFreeze, err := planet.Satellites[0].DB.Console().Projects().Get(ctx, planet.Uplinks[0].Projects[0].ID)
+		require.NoError(t, err)
+		require.NotZero(t, projectPreFreeze.BandwidthLimit)
+		require.NotZero(t, projectPreFreeze.StorageLimit)
+		require.NotZero(t, projectPreFreeze.BurstLimit)
+		require.NotZero(t, projectPreFreeze.RateLimit)
+
+		// freeze can be run multiple times. Test that doing so does not affect Unfreeze result.
+		link := fmt.Sprintf("http://"+address.String()+"/api/users/%s/trial-expiration-freeze", userPreFreeze.Email)
+		body := assertReq(ctx, t, link, http.MethodPut, "", http.StatusOK, "", planet.Satellites[0].Config.Console.AuthToken)
+		require.Len(t, body, 0)
+
+		body = assertReq(ctx, t, link, http.MethodPut, "", http.StatusOK, "", planet.Satellites[0].Config.Console.AuthToken)
+		require.Len(t, body, 0)
+
+		userPostFreeze, err := planet.Satellites[0].DB.Console().Users().Get(ctx, userPreFreeze.ID)
+		require.NoError(t, err)
+		require.Equal(t, console.Active, userPostFreeze.Status)
+		require.Zero(t, userPostFreeze.ProjectStorageLimit)
+		require.Zero(t, userPostFreeze.ProjectBandwidthLimit)
+
+		projectPostFreeze, err := planet.Satellites[0].DB.Console().Projects().Get(ctx, planet.Uplinks[0].Projects[0].ID)
+		require.NoError(t, err)
+		require.Zero(t, projectPostFreeze.BandwidthLimit.Int64())
+		require.Zero(t, projectPostFreeze.StorageLimit.Int64())
+		require.Zero(t, *projectPostFreeze.RateLimit)
+		require.Zero(t, *projectPostFreeze.BurstLimit)
+
+		link = fmt.Sprintf("http://"+address.String()+"/api/users/%s/trial-expiration-freeze", userPreFreeze.Email)
+		body = assertReq(ctx, t, link, http.MethodDelete, "", http.StatusOK, "", planet.Satellites[0].Config.Console.AuthToken)
+		require.Len(t, body, 0)
+
+		unfrozenUser, err := planet.Satellites[0].DB.Console().Users().Get(ctx, userPreFreeze.ID)
+		require.NoError(t, err)
+		require.Equal(t, console.Active, unfrozenUser.Status)
+		require.Equal(t, userPreFreeze.ProjectStorageLimit, unfrozenUser.ProjectStorageLimit)
+		require.Equal(t, userPreFreeze.ProjectBandwidthLimit, unfrozenUser.ProjectBandwidthLimit)
+
+		unfrozenProject, err := planet.Satellites[0].DB.Console().Projects().Get(ctx, projectPreFreeze.ID)
+		require.NoError(t, err)
+		require.Equal(t, projectPreFreeze.StorageLimit, unfrozenProject.StorageLimit)
+		require.Equal(t, projectPreFreeze.BandwidthLimit, unfrozenProject.BandwidthLimit)
+		require.Equal(t, projectPreFreeze.RateLimit, unfrozenProject.RateLimit)
+		require.Equal(t, projectPreFreeze.BurstLimit, unfrozenProject.BurstLimit)
+
+		body = assertReq(ctx, t, link, http.MethodDelete, "", http.StatusNotFound, "", planet.Satellites[0].Config.Console.AuthToken)
+		require.Contains(t, string(body), console.ErrNoFreezeStatus.Error())
+	})
+}
+
 func TestBillingWarnUnwarnUser(t *testing.T) {
 	testplanet.Run(t, testplanet.Config{
 		SatelliteCount:   1,
@@ -626,35 +824,131 @@ func TestBillingWarnUnwarnUser(t *testing.T) {
 }
 
 func TestUserDelete(t *testing.T) {
-	testplanet.Run(t, testplanet.Config{
-		SatelliteCount:   1,
-		StorageNodeCount: 0,
-		UplinkCount:      1,
-		Reconfigure: testplanet.Reconfigure{
-			Satellite: func(_ *zap.Logger, _ int, config *satellite.Config) {
-				config.Admin.Address = "127.0.0.1:0"
+	t.Run("no member of foreign projects", func(t *testing.T) {
+		testplanet.Run(t, testplanet.Config{
+			SatelliteCount:   1,
+			StorageNodeCount: 0,
+			UplinkCount:      1,
+			Reconfigure: testplanet.Reconfigure{
+				Satellite: func(_ *zap.Logger, _ int, config *satellite.Config) {
+					config.Admin.Address = "127.0.0.1:0"
+				},
 			},
-		},
-	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
-		address := planet.Satellites[0].Admin.Admin.Listener.Addr()
-		user, err := planet.Satellites[0].DB.Console().Users().GetByEmail(ctx, planet.Uplinks[0].Projects[0].Owner.Email)
-		require.NoError(t, err)
+		}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+			address := planet.Satellites[0].Admin.Admin.Listener.Addr()
+			user, err := planet.Satellites[0].DB.Console().Users().GetByEmail(ctx, planet.Uplinks[0].Projects[0].Owner.Email)
+			require.NoError(t, err)
 
-		// Deleting the user should fail, as project exists.
-		link := fmt.Sprintf("http://"+address.String()+"/api/users/%s", user.Email)
-		body := assertReq(ctx, t, link, http.MethodDelete, "", http.StatusConflict, "", planet.Satellites[0].Config.Console.AuthToken)
-		require.Greater(t, len(body), 0)
+			// Deleting the user should fail, as project exists.
+			link := fmt.Sprintf("http://"+address.String()+"/api/users/%s", user.Email)
+			body := assertReq(
+				ctx,
+				t,
+				link,
+				http.MethodDelete,
+				"",
+				http.StatusConflict,
+				"",
+				planet.Satellites[0].Config.Console.AuthToken,
+			)
+			require.Greater(t, len(body), 0)
 
-		err = planet.Satellites[0].DB.Console().Projects().Delete(ctx, planet.Uplinks[0].Projects[0].ID)
-		require.NoError(t, err)
+			err = planet.Satellites[0].DB.Console().Projects().Delete(ctx, planet.Uplinks[0].Projects[0].ID)
+			require.NoError(t, err)
 
-		// Deleting the user should pass, as no project exists for given user.
-		body = assertReq(ctx, t, link, http.MethodDelete, "", http.StatusOK, "", planet.Satellites[0].Config.Console.AuthToken)
-		require.Len(t, body, 0)
+			// Deleting the user should pass, as no project exists for given user.
+			body = assertReq(
+				ctx,
+				t,
+				link,
+				http.MethodDelete,
+				"",
+				http.StatusOK,
+				"",
+				planet.Satellites[0].Config.Console.AuthToken,
+			)
+			require.Len(t, body, 0)
 
-		// Deleting non-existing user returns Not Found.
-		body = assertReq(ctx, t, link, http.MethodDelete, "", http.StatusNotFound, "", planet.Satellites[0].Config.Console.AuthToken)
-		require.Contains(t, string(body), "does not exist")
+			// Deleting non-existing user returns Not Found.
+			body = assertReq(
+				ctx,
+				t,
+				link,
+				http.MethodDelete,
+				"",
+				http.StatusNotFound,
+				"",
+				planet.Satellites[0].Config.Console.AuthToken,
+			)
+			require.Contains(t, string(body), "does not exist")
+		})
+	})
+
+	t.Run("member of foreign projects", func(t *testing.T) {
+		testplanet.Run(t, testplanet.Config{
+			SatelliteCount:   1,
+			StorageNodeCount: 0,
+			UplinkCount:      1,
+			Reconfigure: testplanet.Reconfigure{
+				Satellite: func(_ *zap.Logger, _ int, config *satellite.Config) {
+					config.Admin.Address = "127.0.0.1:0"
+				},
+			},
+		}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+			dbconsole := planet.Satellites[0].DB.Console()
+			address := planet.Satellites[0].Admin.Admin.Listener.Addr()
+			user, err := dbconsole.Users().GetByEmail(ctx, planet.Uplinks[0].Projects[0].Owner.Email)
+			require.NoError(t, err)
+
+			userSharing, err := dbconsole.Users().Insert(ctx, &console.User{
+				ID:           testrand.UUID(),
+				FullName:     "Sharing",
+				Email:        testrand.UUID().String() + "@storj.test",
+				PasswordHash: testrand.UUID().Bytes(),
+			})
+			require.NoError(t, err)
+
+			sharedProject, err := dbconsole.Projects().Insert(ctx, &console.Project{
+				Name:    "sharing",
+				OwnerID: userSharing.ID,
+			})
+			require.NoError(t, err)
+
+			members, err := dbconsole.ProjectMembers().
+				GetPagedWithInvitationsByProjectID(ctx, sharedProject.ID, console.ProjectMembersCursor{Limit: 2, Page: 1})
+			require.NoError(t, err)
+			require.EqualValues(t, 0, members.TotalCount)
+
+			_, err = dbconsole.ProjectMembers().Insert(ctx, user.ID, sharedProject.ID)
+			require.NoError(t, err)
+
+			members, err = dbconsole.ProjectMembers().
+				GetPagedWithInvitationsByProjectID(ctx, sharedProject.ID, console.ProjectMembersCursor{Limit: 2, Page: 1})
+			require.NoError(t, err)
+			require.EqualValues(t, 1, members.TotalCount)
+
+			err = planet.Satellites[0].DB.Console().Projects().Delete(ctx, planet.Uplinks[0].Projects[0].ID)
+			require.NoError(t, err)
+
+			// Deleting the user should pass, as no project exists for given user.
+			link := fmt.Sprintf("http://"+address.String()+"/api/users/%s", user.Email)
+			body := assertReq(
+				ctx,
+				t,
+				link,
+				http.MethodDelete,
+				"",
+				http.StatusOK,
+				"",
+				planet.Satellites[0].Config.Console.AuthToken,
+			)
+			require.Len(t, body, 0)
+
+			members, err = dbconsole.ProjectMembers().
+				GetPagedWithInvitationsByProjectID(ctx, sharedProject.ID, console.ProjectMembersCursor{Limit: 2, Page: 1})
+			require.NoError(t, err)
+			require.EqualValues(t, 0, members.TotalCount)
+		})
 	})
 }
 

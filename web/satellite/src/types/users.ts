@@ -109,6 +109,8 @@ export class User {
         public mfaRecoveryCodeCount: number = 0,
         public _createdAt: string | null = null,
         public pendingVerification: boolean = false,
+        public trialExpiration: Date | null = null,
+        public hasVarPartner: boolean = false,
         public signupPromoCode: string = '',
         public freezeStatus: FreezeStatus = new FreezeStatus(),
     ) { }
@@ -127,6 +129,25 @@ export class User {
     public getFullName(): string {
         return !this.shortName ? this.fullName : this.shortName;
     }
+
+    public getExpirationInfo(daysBeforeNotify: number): ExpirationInfo {
+        if (!this.trialExpiration) return { isCloseToExpiredTrial: false, days: 0 };
+
+        const now = new Date();
+        const diff = this.trialExpiration.getTime() - now.getTime();
+        const millisecondsInDay = 24 * 60 * 60 * 1000;
+        const daysBeforeNotifyInMilliseconds = daysBeforeNotify * millisecondsInDay;
+
+        return {
+            isCloseToExpiredTrial: diff > 0 && diff < daysBeforeNotifyInMilliseconds,
+            days: Math.round(Math.abs(diff) / millisecondsInDay),
+        };
+    }
+}
+
+export type ExpirationInfo = {
+    isCloseToExpiredTrial: boolean;
+    days: number;
 }
 
 /**
@@ -157,10 +178,13 @@ export class UpdatedUser {
 export interface AccountSetupData {
     fullName: string
     isProfessional: boolean
+    haveSalesContact: boolean
     position?: string
     companyName?: string
     employeeCount?: string
     storageNeeds?: string
+    storageUseCase?: string
+    functionalArea?: string
 }
 
 /**
@@ -193,6 +217,7 @@ export class UserSettings {
         public onboardingEnd = false,
         public passphrasePrompt = true,
         public onboardingStep: string | null = null,
+        public noticeDismissal: NoticeDismissal = { fileGuide: false, serverSideEncryption: false, partnerUpgradeBanner: false, projectMembersPassphrase: false },
     ) { }
 
     public get sessionDuration(): Duration | null {
@@ -203,12 +228,20 @@ export class UserSettings {
     }
 }
 
+export interface NoticeDismissal {
+    fileGuide: boolean
+    serverSideEncryption: boolean
+    partnerUpgradeBanner: boolean
+    projectMembersPassphrase: boolean
+}
+
 export interface SetUserSettingsData {
     onboardingStart?: boolean
     onboardingEnd?: boolean;
     passphrasePrompt?: boolean;
     onboardingStep?: string | null;
     sessionDuration?: number;
+    noticeDismissal?: NoticeDismissal;
 }
 
 /**
@@ -218,15 +251,38 @@ export class FreezeStatus {
     public constructor(
         public frozen = false,
         public warned = false,
+        public trialExpiredFrozen = false,
     ) { }
 }
 
 /**
- * AccountSetupStep are the steps in the account setup dialog.
+ * OnboardingStep are the steps in the account setup dialog and onboarding stepper.
  */
-export enum AccountSetupStep {
-    Choice,
-    Personal,
-    Business,
-    Success,
+export enum OnboardingStep {
+    AccountTypeSelection = 'AccountTypeSelection',
+    PersonalAccountForm = 'PersonalAccountForm',
+    PricingPlanSelection = 'PricingPlanSelection',
+    PricingPlan = 'PricingPlan',
+    BusinessAccountForm = 'BusinessAccountForm',
+    SetupComplete = 'SetupComplete',
+    EncryptionPassphrase = 'EncryptionPassphrase',
+    CreateBucket = 'CreateBucket',
+    UploadFiles = 'UploadFiles',
+    CreateAccess = 'CreateAccess',
 }
+
+export const ONBOARDING_STEPPER_STEPS = [
+    OnboardingStep.EncryptionPassphrase,
+    OnboardingStep.CreateBucket,
+    OnboardingStep.UploadFiles,
+    OnboardingStep.CreateAccess,
+];
+
+export const ACCOUNT_SETUP_STEPS = [
+    OnboardingStep.AccountTypeSelection,
+    OnboardingStep.PersonalAccountForm,
+    OnboardingStep.PricingPlanSelection,
+    OnboardingStep.PricingPlan,
+    OnboardingStep.BusinessAccountForm,
+    OnboardingStep.SetupComplete,
+];

@@ -16,7 +16,7 @@ import (
 	"storj.io/common/storj"
 	"storj.io/common/storj/location"
 	"storj.io/common/sync2"
-	"storj.io/private/version"
+	"storj.io/common/version"
 	"storj.io/storj/satellite/geoip"
 	"storj.io/storj/satellite/nodeevents"
 	"storj.io/storj/satellite/nodeselection"
@@ -143,6 +143,9 @@ type DB interface {
 
 	// GetNodeTags returns all nodes for a specific node.
 	GetNodeTags(ctx context.Context, id storj.NodeID) (nodeselection.NodeTags, error)
+
+	// GetLastIPPortByNodeTagNames gets last IP and port from nodes where node exists in node tags with a particular name.
+	GetLastIPPortByNodeTagNames(ctx context.Context, ids storj.NodeIDList, tagName []string) (lastIPPorts map[storj.NodeID]*string, err error)
 }
 
 // DisqualificationReason is disqualification reason enum type.
@@ -185,11 +188,10 @@ type InfoResponse struct {
 
 // FindStorageNodesRequest defines easy request parameters.
 type FindStorageNodesRequest struct {
-	RequestedCount     int
-	ExcludedIDs        []storj.NodeID
-	MinimumVersion     string        // semver or empty
-	AsOfSystemInterval time.Duration // only used for CRDB queries
-	Placement          storj.PlacementConstraint
+	RequestedCount  int
+	ExcludedIDs     []storj.NodeID
+	AlreadySelected []*nodeselection.SelectedNode
+	Placement       storj.PlacementConstraint
 }
 
 // NodeCriteria are the requirements for selecting nodes.
@@ -292,25 +294,26 @@ type NodeReputation struct {
 //
 // architecture: Service
 type Service struct {
-	log              *zap.Logger
-	db               DB
-	nodeEvents       nodeevents.DB
-	satelliteName    string
-	satelliteAddress string
-	config           Config
+	log                  *zap.Logger
+	db                   DB
+	nodeEvents           nodeevents.DB
+	satelliteName        string
+	satelliteAddress     string
+	nodeTagsIPPortEmails []string
+	config               Config
 
 	GeoIP                  geoip.IPToCountry
 	UploadSelectionCache   *UploadSelectionCache
 	DownloadSelectionCache *DownloadSelectionCache
 	LastNetFunc            LastNetFunc
-	placementRules         PlacementRules
+	placementDefinitions   nodeselection.PlacementDefinitions
 }
 
 // LastNetFunc is the type of a function that will be used to derive a network from an ip and port.
 type LastNetFunc func(config NodeSelectionConfig, ip net.IP, port string) (string, error)
 
 // NewService returns a new Service.
-func NewService(log *zap.Logger, db DB, nodeEvents nodeevents.DB, placementRules PlacementRules, satelliteAddr, satelliteName string, config Config) (*Service, error) {
+func NewService(log *zap.Logger, db DB, nodeEvents nodeevents.DB, placements nodeselection.PlacementDefinitions, satelliteAddr, satelliteName string, config Config) (*Service, error) {
 	err := config.Node.AsOfSystemTime.isValid()
 	if err != nil {
 		return nil, errs.Wrap(err)
@@ -340,13 +343,13 @@ func NewService(log *zap.Logger, db DB, nodeEvents nodeevents.DB, placementRules
 
 	uploadSelectionCache, err := NewUploadSelectionCache(log, db,
 		config.NodeSelectionCache.Staleness, config.Node,
-		defaultSelection, placementRules,
+		defaultSelection, placements,
 	)
 	if err != nil {
 		return nil, errs.Wrap(err)
 	}
 	downloadSelectionCache, err := NewDownloadSelectionCache(log, db,
-		placementRules,
+		placements.CreateFilters,
 		DownloadSelectionCacheConfig{
 			Staleness:      config.NodeSelectionCache.Staleness,
 			OnlineWindow:   config.Node.OnlineWindow,
@@ -357,12 +360,13 @@ func NewService(log *zap.Logger, db DB, nodeEvents nodeevents.DB, placementRules
 	}
 
 	return &Service{
-		log:              log,
-		db:               db,
-		nodeEvents:       nodeEvents,
-		satelliteAddress: satelliteAddr,
-		satelliteName:    satelliteName,
-		config:           config,
+		log:                  log,
+		db:                   db,
+		nodeEvents:           nodeEvents,
+		satelliteAddress:     satelliteAddr,
+		satelliteName:        satelliteName,
+		nodeTagsIPPortEmails: config.NodeTagsIPPortEmails,
+		config:               config,
 
 		GeoIP: geoIP,
 
@@ -370,7 +374,7 @@ func NewService(log *zap.Logger, db DB, nodeEvents nodeevents.DB, placementRules
 		DownloadSelectionCache: downloadSelectionCache,
 		LastNetFunc:            MaskOffLastNet,
 
-		placementRules: placementRules,
+		placementDefinitions: placements,
 	}, nil
 }
 
@@ -429,9 +433,6 @@ func (service *Service) FindStorageNodesForGracefulExit(ctx context.Context, req
 // FindStorageNodesForUpload searches the for nodes in the cache that meet the provided requirements for upload.
 func (service *Service) FindStorageNodesForUpload(ctx context.Context, req FindStorageNodesRequest) (_ []*nodeselection.SelectedNode, err error) {
 	defer mon.Task()(&ctx)(&err)
-	if service.config.Node.AsOfSystemTime.Enabled && service.config.Node.AsOfSystemTime.DefaultInterval < 0 {
-		req.AsOfSystemInterval = service.config.Node.AsOfSystemTime.DefaultInterval
-	}
 
 	selectedNodes, err := service.UploadSelectionCache.GetNodes(ctx, req)
 	if err != nil {
@@ -439,15 +440,14 @@ func (service *Service) FindStorageNodesForUpload(ctx context.Context, req FindS
 	}
 	if len(selectedNodes) < req.RequestedCount {
 
-		excludedIDs := make([]string, 0)
-		for _, e := range req.ExcludedIDs {
-			excludedIDs = append(excludedIDs, e.String())
+		var alreadySelectedIDs []storj.NodeID
+		for _, e := range req.AlreadySelected {
+			alreadySelectedIDs = append(alreadySelectedIDs, e.ID)
 		}
 
 		service.log.Warn("Not enough nodes are available from Node Cache",
-			zap.String("minVersion", req.MinimumVersion),
-			zap.Strings("excludedIDs", excludedIDs),
-			zap.Duration("asOfSystemInterval", req.AsOfSystemInterval),
+			zap.Stringers("excludedIDs", req.ExcludedIDs),
+			zap.Stringers("alreadySelected", alreadySelectedIDs),
 			zap.Int("requested", req.RequestedCount),
 			zap.Int("available", len(selectedNodes)),
 			zap.Uint16("placement", uint16(req.Placement)))
@@ -470,9 +470,22 @@ func (service *Service) InsertOfflineNodeEvents(ctx context.Context, cooldown ti
 
 	count = len(nodes)
 
+	var lastIPPorts map[storj.NodeID]*string
+	if len(service.nodeTagsIPPortEmails) > 0 {
+		var nodeIDs storj.NodeIDList
+		for id := range nodes {
+			nodeIDs = append(nodeIDs, id)
+		}
+		lastIPPorts, err = service.db.GetLastIPPortByNodeTagNames(ctx, nodeIDs, service.nodeTagsIPPortEmails)
+		if err != nil {
+			service.log.Error("could not get last IP and ports for nodes", zap.Error(err))
+		}
+	}
+
 	var successful storj.NodeIDList
 	for id, email := range nodes {
-		_, err = service.nodeEvents.Insert(ctx, email, id, nodeevents.Offline)
+		lastIPPort := lastIPPorts[id]
+		_, err = service.nodeEvents.Insert(ctx, email, lastIPPort, id, nodeevents.Offline)
 		if err != nil {
 			service.log.Error("could not insert node offline into node events", zap.Error(err))
 		} else {
@@ -633,7 +646,7 @@ func (service *Service) UpdateCheckIn(ctx context.Context, node NodeCheckInInfo,
 			node.VersionBelowMin = true
 			if oldInfo.LastSoftwareUpdateEmail == nil ||
 				oldInfo.LastSoftwareUpdateEmail.Add(service.config.NodeSoftwareUpdateEmailCooldown).Before(timestamp) {
-				_, err = service.nodeEvents.Insert(ctx, node.Operator.Email, node.NodeID, nodeevents.BelowMinVersion)
+				_, err = service.nodeEvents.Insert(ctx, node.Operator.Email, nil, node.NodeID, nodeevents.BelowMinVersion)
 				if err != nil {
 					service.log.Error("could not insert node software below minimum version into node events", zap.Error(err))
 				} else {
@@ -652,7 +665,7 @@ func (service *Service) UpdateCheckIn(ctx context.Context, node NodeCheckInInfo,
 		}
 
 		if service.config.SendNodeEmails && node.IsUp && oldInfo.Reputation.LastContactSuccess.Add(service.config.Node.OnlineWindow).Before(timestamp) {
-			_, err = service.nodeEvents.Insert(ctx, node.Operator.Email, node.NodeID, nodeevents.Online)
+			_, err = service.nodeEvents.Insert(ctx, node.Operator.Email, nil, node.NodeID, nodeevents.Online)
 			return Error.Wrap(err)
 		}
 		return nil
@@ -676,7 +689,7 @@ func (service *Service) DQNodesLastSeenBefore(ctx context.Context, cutoff time.T
 	}
 	if service.config.SendNodeEmails {
 		for nodeID, email := range nodes {
-			_, err = service.nodeEvents.Insert(ctx, email, nodeID, nodeevents.Disqualified)
+			_, err = service.nodeEvents.Insert(ctx, email, nil, nodeID, nodeevents.Disqualified)
 			if err != nil {
 				service.log.Error("could not insert node disqualified into node events", zap.Error(err))
 			}
@@ -693,7 +706,7 @@ func (service *Service) DisqualifyNode(ctx context.Context, nodeID storj.NodeID,
 		return err
 	}
 	if service.config.SendNodeEmails {
-		_, err = service.nodeEvents.Insert(ctx, email, nodeID, nodeevents.Disqualified)
+		_, err = service.nodeEvents.Insert(ctx, email, nil, nodeID, nodeevents.Disqualified)
 		if err != nil {
 			service.log.Error("could not insert node disqualified into node events")
 		}
@@ -723,10 +736,10 @@ func (service *Service) GetNodeTags(ctx context.Context, id storj.NodeID) (nodes
 	return service.db.GetNodeTags(ctx, id)
 }
 
-// GetLocationFromPlacement returns the value for `nodeselection.Location` that
-// placement is currently annotated with.
+// GetLocationFromPlacement returns the location identifier of the bucket.
+// It comes from the name of the placement (or `nodeselection.Location` in case of legacy config).
 func (service *Service) GetLocationFromPlacement(placement storj.PlacementConstraint) string {
-	return nodeselection.GetAnnotation(service.placementRules(placement), nodeselection.Location)
+	return service.placementDefinitions[placement].Name
 }
 
 // ResolveIPAndNetwork resolves the target address and determines its IP and appropriate last_net, as indicated.
@@ -819,27 +832,27 @@ func (service *Service) insertReputationNodeEvents(ctx context.Context, email st
 	for _, event := range repEvents {
 		switch event {
 		case nodeevents.Disqualified:
-			_, err := service.nodeEvents.Insert(ctx, email, id, nodeevents.Disqualified)
+			_, err := service.nodeEvents.Insert(ctx, email, nil, id, nodeevents.Disqualified)
 			if err != nil {
 				service.log.Error("could not insert node disqualified into node events", zap.Error(err))
 			}
 		case nodeevents.UnknownAuditSuspended:
-			_, err := service.nodeEvents.Insert(ctx, email, id, nodeevents.UnknownAuditSuspended)
+			_, err := service.nodeEvents.Insert(ctx, email, nil, id, nodeevents.UnknownAuditSuspended)
 			if err != nil {
 				service.log.Error("could not insert node unknown audit suspended into node events", zap.Error(err))
 			}
 		case nodeevents.UnknownAuditUnsuspended:
-			_, err := service.nodeEvents.Insert(ctx, email, id, nodeevents.UnknownAuditUnsuspended)
+			_, err := service.nodeEvents.Insert(ctx, email, nil, id, nodeevents.UnknownAuditUnsuspended)
 			if err != nil {
 				service.log.Error("could not insert node unknown audit unsuspended into node events", zap.Error(err))
 			}
 		case nodeevents.OfflineSuspended:
-			_, err := service.nodeEvents.Insert(ctx, email, id, nodeevents.OfflineSuspended)
+			_, err := service.nodeEvents.Insert(ctx, email, nil, id, nodeevents.OfflineSuspended)
 			if err != nil {
 				service.log.Error("could not insert node offline suspended into node events", zap.Error(err))
 			}
 		case nodeevents.OfflineUnsuspended:
-			_, err := service.nodeEvents.Insert(ctx, email, id, nodeevents.OfflineUnsuspended)
+			_, err := service.nodeEvents.Insert(ctx, email, nil, id, nodeevents.OfflineUnsuspended)
 			if err != nil {
 				service.log.Error("could not insert node offline unsuspended into node events", zap.Error(err))
 			}

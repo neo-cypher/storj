@@ -51,6 +51,7 @@ type Auth struct {
 	ActivateAccountURL        string
 	ActivationCodeEnabled     bool
 	SatelliteName             string
+	badPasswords              map[string]struct{}
 	service                   *console.Service
 	accountFreezeService      *console.AccountFreezeService
 	analytics                 *analytics.Service
@@ -59,7 +60,7 @@ type Auth struct {
 }
 
 // NewAuth is a constructor for api auth controller.
-func NewAuth(log *zap.Logger, service *console.Service, accountFreezeService *console.AccountFreezeService, mailService *mailservice.Service, cookieAuth *consolewebauth.CookieAuth, analytics *analytics.Service, satelliteName, externalAddress, letUsKnowURL, termsAndConditionsURL, contactInfoURL, generalRequestURL string, activationCodeEnabled bool) *Auth {
+func NewAuth(log *zap.Logger, service *console.Service, accountFreezeService *console.AccountFreezeService, mailService *mailservice.Service, cookieAuth *consolewebauth.CookieAuth, analytics *analytics.Service, satelliteName, externalAddress, letUsKnowURL, termsAndConditionsURL, contactInfoURL, generalRequestURL string, activationCodeEnabled bool, badPasswords map[string]struct{}) *Auth {
 	return &Auth{
 		log:                       log,
 		ExternalAddress:           externalAddress,
@@ -77,6 +78,7 @@ func NewAuth(log *zap.Logger, service *console.Service, accountFreezeService *co
 		mailService:               mailService,
 		cookieAuth:                cookieAuth,
 		analytics:                 analytics,
+		badPasswords:              badPasswords,
 	}
 }
 
@@ -228,6 +230,7 @@ func (a *Auth) Register(w http.ResponseWriter, r *http.Request) {
 		HaveSalesContact bool   `json:"haveSalesContact"`
 		CaptchaResponse  string `json:"captchaResponse"`
 		SignupPromoCode  string `json:"signupPromoCode"`
+		IsMinimal        bool   `json:"isMinimal"`
 	}
 
 	err = json.NewDecoder(r.Body).Decode(&registerData)
@@ -243,6 +246,14 @@ func (a *Auth) Register(w http.ResponseWriter, r *http.Request) {
 	if !isValidEmail {
 		a.serveJSONError(ctx, w, console.ErrValidation.Wrap(errs.New("Invalid email.")))
 		return
+	}
+
+	if a.badPasswords != nil {
+		_, exists := a.badPasswords[registerData.Password]
+		if exists {
+			a.serveJSONError(ctx, w, console.ErrValidation.Wrap(errs.New("The password you chose is on a list of insecure or breached passwords. Please choose a different one.")))
+			return
+		}
 	}
 
 	if len([]rune(registerData.Partner)) > 100 {
@@ -331,8 +342,8 @@ func (a *Auth) Register(w http.ResponseWriter, r *http.Request) {
 				SignupPromoCode:  registerData.SignupPromoCode,
 				ActivationCode:   code,
 				SignupId:         requestID,
-				// signup from the v2 app doesn't require name.
-				AllowNoName: strings.Contains(r.Referer(), "v2"),
+				// the minimal signup from the v2 app doesn't require name.
+				AllowNoName: registerData.IsMinimal,
 			},
 			secret,
 		)
@@ -398,6 +409,12 @@ func (a *Auth) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.ActivationCodeEnabled {
+		*user, err = a.service.SetActivationCodeAndSignupID(ctx, *user)
+		if err != nil {
+			a.serveJSONError(ctx, w, err)
+			return
+		}
+
 		a.mailService.SendRenderedAsync(
 			ctx,
 			[]post.Address{{Address: user.Email}},
@@ -494,7 +511,7 @@ func (a *Auth) ActivateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokenInfo, err := a.service.GenerateSessionToken(ctx, user.ID, user.Email, ip, r.UserAgent())
+	tokenInfo, err := a.service.GenerateSessionToken(ctx, user.ID, user.Email, ip, r.UserAgent(), nil)
 	if err != nil {
 		a.serveJSONError(ctx, w, err)
 		return
@@ -526,9 +543,10 @@ func loadSession(req *http.Request) string {
 // GetFreezeStatus checks to see if an account is frozen or warned.
 func (a *Auth) GetFreezeStatus(w http.ResponseWriter, r *http.Request) {
 	type FrozenResult struct {
-		Frozen          bool `json:"frozen"`
-		Warned          bool `json:"warned"`
-		ViolationFrozen bool `json:"violationFrozen"`
+		Frozen             bool `json:"frozen"`
+		Warned             bool `json:"warned"`
+		ViolationFrozen    bool `json:"violationFrozen"`
+		TrialExpiredFrozen bool `json:"trialExpiredFrozen"`
 	}
 
 	ctx := r.Context()
@@ -549,9 +567,10 @@ func (a *Auth) GetFreezeStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	err = json.NewEncoder(w).Encode(FrozenResult{
-		Frozen:          freezes.BillingFreeze != nil,
-		Warned:          freezes.BillingWarning != nil,
-		ViolationFrozen: freezes.ViolationFreeze != nil,
+		Frozen:             freezes.BillingFreeze != nil,
+		Warned:             freezes.BillingWarning != nil,
+		ViolationFrozen:    freezes.ViolationFreeze != nil,
+		TrialExpiredFrozen: freezes.TrialExpirationFreeze != nil,
 	})
 	if err != nil {
 		a.log.Error("could not encode account status", zap.Error(ErrAuthAPI.Wrap(err)))
@@ -607,25 +626,27 @@ func (a *Auth) GetAccount(w http.ResponseWriter, r *http.Request) {
 	defer mon.Task()(&ctx)(&err)
 
 	var user struct {
-		ID                    uuid.UUID `json:"id"`
-		FullName              string    `json:"fullName"`
-		ShortName             string    `json:"shortName"`
-		Email                 string    `json:"email"`
-		Partner               string    `json:"partner"`
-		ProjectLimit          int       `json:"projectLimit"`
-		ProjectStorageLimit   int64     `json:"projectStorageLimit"`
-		ProjectBandwidthLimit int64     `json:"projectBandwidthLimit"`
-		ProjectSegmentLimit   int64     `json:"projectSegmentLimit"`
-		IsProfessional        bool      `json:"isProfessional"`
-		Position              string    `json:"position"`
-		CompanyName           string    `json:"companyName"`
-		EmployeeCount         string    `json:"employeeCount"`
-		HaveSalesContact      bool      `json:"haveSalesContact"`
-		PaidTier              bool      `json:"paidTier"`
-		MFAEnabled            bool      `json:"isMFAEnabled"`
-		MFARecoveryCodeCount  int       `json:"mfaRecoveryCodeCount"`
-		CreatedAt             time.Time `json:"createdAt"`
-		PendingVerification   bool      `json:"pendingVerification"`
+		ID                    uuid.UUID  `json:"id"`
+		FullName              string     `json:"fullName"`
+		ShortName             string     `json:"shortName"`
+		Email                 string     `json:"email"`
+		Partner               string     `json:"partner"`
+		ProjectLimit          int        `json:"projectLimit"`
+		ProjectStorageLimit   int64      `json:"projectStorageLimit"`
+		ProjectBandwidthLimit int64      `json:"projectBandwidthLimit"`
+		ProjectSegmentLimit   int64      `json:"projectSegmentLimit"`
+		IsProfessional        bool       `json:"isProfessional"`
+		Position              string     `json:"position"`
+		CompanyName           string     `json:"companyName"`
+		EmployeeCount         string     `json:"employeeCount"`
+		HaveSalesContact      bool       `json:"haveSalesContact"`
+		PaidTier              bool       `json:"paidTier"`
+		MFAEnabled            bool       `json:"isMFAEnabled"`
+		MFARecoveryCodeCount  int        `json:"mfaRecoveryCodeCount"`
+		CreatedAt             time.Time  `json:"createdAt"`
+		PendingVerification   bool       `json:"pendingVerification"`
+		TrialExpiration       *time.Time `json:"trialExpiration"`
+		HasVarPartner         bool       `json:"hasVarPartner"`
 	}
 
 	consoleUser, err := console.GetUser(ctx)
@@ -655,43 +676,17 @@ func (a *Auth) GetAccount(w http.ResponseWriter, r *http.Request) {
 	user.MFARecoveryCodeCount = len(consoleUser.MFARecoveryCodes)
 	user.CreatedAt = consoleUser.CreatedAt
 	user.PendingVerification = consoleUser.Status == console.PendingBotVerification
+	user.TrialExpiration = consoleUser.TrialExpiration
+	user.HasVarPartner, err = a.service.GetUserHasVarPartner(ctx)
+	if err != nil {
+		a.serveJSONError(ctx, w, err)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	err = json.NewEncoder(w).Encode(&user)
 	if err != nil {
 		a.log.Error("could not encode user info", zap.Error(ErrAuthAPI.Wrap(err)))
-		return
-	}
-}
-
-// DeleteAccount authorizes user and deletes account by password.
-func (a *Auth) DeleteAccount(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	defer mon.Task()(&ctx)(&errNotImplemented)
-
-	// We do not want to allow account deletion via API currently.
-	a.serveJSONError(ctx, w, errNotImplemented)
-}
-
-// ChangeEmail auth user, changes users email for a new one.
-func (a *Auth) ChangeEmail(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	var err error
-	defer mon.Task()(&ctx)(&err)
-
-	var emailChange struct {
-		NewEmail string `json:"newEmail"`
-	}
-
-	err = json.NewDecoder(r.Body).Decode(&emailChange)
-	if err != nil {
-		a.serveJSONError(ctx, w, err)
-		return
-	}
-
-	err = a.service.ChangeEmail(ctx, emailChange.NewEmail)
-	if err != nil {
-		a.serveJSONError(ctx, w, err)
 		return
 	}
 }
@@ -711,6 +706,14 @@ func (a *Auth) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.serveJSONError(ctx, w, err)
 		return
+	}
+
+	if a.badPasswords != nil {
+		_, exists := a.badPasswords[passwordChange.NewPassword]
+		if exists {
+			a.serveJSONError(ctx, w, console.ErrValidation.Wrap(errs.New("The password you chose is on a list of insecure or breached passwords. Please choose a different one.")))
+			return
+		}
 	}
 
 	err = a.service.ChangePassword(ctx, passwordChange.CurrentPassword, passwordChange.NewPassword)
@@ -801,7 +804,6 @@ func (a *Auth) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 		[]post.Address{{Address: user.Email, Name: userName}},
 		&console.ForgotPasswordEmail{
 			Origin:                     a.ExternalAddress,
-			UserName:                   userName,
 			ResetLink:                  passwordRecoveryLink,
 			CancelPasswordRecoveryLink: cancelPasswordRecoveryLink,
 			LetUsKnowURL:               letUsKnowURL,
@@ -846,7 +848,6 @@ func (a *Auth) ResendEmail(w http.ResponseWriter, r *http.Request) {
 			[]post.Address{{Address: verified.Email, Name: userName}},
 			&console.ForgotPasswordEmail{
 				Origin:                     a.ExternalAddress,
-				UserName:                   userName,
 				ResetLink:                  a.PasswordRecoveryURL + "?token=" + recoveryToken,
 				CancelPasswordRecoveryLink: a.CancelPasswordRecoveryURL + "?token=" + recoveryToken,
 				LetUsKnowURL:               a.LetUsKnowURL,
@@ -1068,6 +1069,14 @@ func (a *Auth) ResetPassword(w http.ResponseWriter, r *http.Request) {
 		a.serveJSONError(ctx, w, err)
 	}
 
+	if a.badPasswords != nil {
+		_, exists := a.badPasswords[resetPassword.NewPassword]
+		if exists {
+			a.serveJSONError(ctx, w, console.ErrValidation.Wrap(errs.New("The password you chose is on a list of insecure or breached passwords. Please choose a different one.")))
+			return
+		}
+	}
+
 	err = a.service.ResetPassword(ctx, resetPassword.RecoveryToken, resetPassword.NewPassword, resetPassword.MFAPasscode, resetPassword.MFARecoveryCode, time.Now())
 
 	if console.ErrMFAMissing.Has(err) || console.ErrMFAPasscode.Has(err) || console.ErrMFARecoveryCode.Has(err) {
@@ -1197,11 +1206,12 @@ func (a *Auth) SetUserSettings(w http.ResponseWriter, r *http.Request) {
 	defer mon.Task()(&ctx)(&err)
 
 	var updateInfo struct {
-		OnboardingStart  *bool   `json:"onboardingStart"`
-		OnboardingEnd    *bool   `json:"onboardingEnd"`
-		PassphrasePrompt *bool   `json:"passphrasePrompt"`
-		OnboardingStep   *string `json:"onboardingStep"`
-		SessionDuration  *int64  `json:"sessionDuration"`
+		OnboardingStart  *bool                    `json:"onboardingStart"`
+		OnboardingEnd    *bool                    `json:"onboardingEnd"`
+		PassphrasePrompt *bool                    `json:"passphrasePrompt"`
+		OnboardingStep   *string                  `json:"onboardingStep"`
+		SessionDuration  *int64                   `json:"sessionDuration"`
+		NoticeDismissal  *console.NoticeDismissal `json:"noticeDismissal"`
 	}
 
 	err = json.NewDecoder(r.Body).Decode(&updateInfo)
@@ -1225,6 +1235,7 @@ func (a *Auth) SetUserSettings(w http.ResponseWriter, r *http.Request) {
 		OnboardingStep:   updateInfo.OnboardingStep,
 		PassphrasePrompt: updateInfo.PassphrasePrompt,
 		SessionDuration:  newDuration,
+		NoticeDismissal:  updateInfo.NoticeDismissal,
 	})
 	if err != nil {
 		a.serveJSONError(ctx, w, err)
@@ -1272,6 +1283,8 @@ func (a *Auth) getStatusCode(err error) int {
 		return http.StatusUnauthorized
 	case console.ErrEmailUsed.Has(err), console.ErrMFAConflict.Has(err):
 		return http.StatusConflict
+	case console.ErrLoginRestricted.Has(err):
+		return http.StatusForbidden
 	case errors.Is(err, errNotImplemented):
 		return http.StatusNotImplemented
 	case console.ErrNotPaidTier.Has(err):
@@ -1309,6 +1322,8 @@ func (a *Auth) getUserErrorMessage(err error) string {
 		return "The MFA recovery code is not valid or has been previously used"
 	case console.ErrLoginCredentials.Has(err):
 		return "Your login credentials are incorrect, please try again"
+	case console.ErrLoginRestricted.Has(err):
+		return "You can't be authenticated. Please contact support"
 	case console.ErrValidation.Has(err), console.ErrChangePassword.Has(err), console.ErrInvalidProjectLimit.Has(err), console.ErrNotPaidTier.Has(err):
 		return err.Error()
 	case errors.Is(err, errNotImplemented):

@@ -13,10 +13,10 @@ import (
 
 	"github.com/zeebo/errs"
 
+	"storj.io/common/dbutil/pgutil"
 	"storj.io/common/memory"
 	"storj.io/common/storj"
 	"storj.io/common/uuid"
-	"storj.io/private/dbutil/pgutil"
 	"storj.io/storj/satellite/console"
 	"storj.io/storj/satellite/satellitedb/dbx"
 )
@@ -59,6 +59,67 @@ func (users *users) Get(ctx context.Context, id uuid.UUID) (_ *console.User, err
 	}
 
 	return userFromDBX(ctx, user)
+}
+
+func (users *users) GetExpiredFreeTrialsAfter(ctx context.Context, after time.Time, cursor console.UserCursor) (page *console.UsersPage, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	if cursor.Limit == 0 {
+		return nil, Error.New("limit cannot be 0")
+	}
+
+	if cursor.Page == 0 {
+		return nil, Error.New("page cannot be 0")
+	}
+
+	page = &console.UsersPage{
+		Limit:  cursor.Limit,
+		Offset: uint64((cursor.Page - 1) * cursor.Limit),
+	}
+
+	count, err := users.db.Count_User_By_PaidTier_Equal_False_And_TrialExpiration_Less(ctx, dbx.User_TrialExpiration(after))
+	if err != nil {
+		return nil, err
+	}
+	page.TotalCount = uint64(count)
+
+	if page.TotalCount == 0 {
+		return page, nil
+	}
+
+	dbxUsers, err := users.db.Limited_User_Id_User_Email_By_PaidTier_Equal_False_And_TrialExpiration_Less(ctx,
+		dbx.User_TrialExpiration(after),
+		int(page.Limit), int64(page.Offset))
+	if err != nil {
+		if errs.Is(err, sql.ErrNoRows) {
+			return &console.UsersPage{
+				Users: []console.User{},
+			}, nil
+		}
+		return nil, Error.Wrap(err)
+	}
+
+	for _, usr := range dbxUsers {
+		id, err := uuid.FromBytes(usr.Id)
+		if err != nil {
+			return &console.UsersPage{
+				Users: []console.User{},
+			}, nil
+		}
+		page.Users = append(page.Users, console.User{
+			ID:    id,
+			Email: usr.Email,
+		})
+	}
+
+	page.PageCount = uint(page.TotalCount / uint64(cursor.Limit))
+	if page.TotalCount%uint64(cursor.Limit) != 0 {
+		page.PageCount++
+	}
+
+	page.CurrentPage = cursor.Page
+
+	return page, nil
 }
 
 // GetByEmailWithUnverified is a method for querying users by email from the database.
@@ -257,6 +318,10 @@ func (users *users) Insert(ctx context.Context, user *console.User) (_ *console.
 		optional.SignupId = dbx.User_SignupId(user.SignupId)
 	}
 
+	if user.TrialExpiration != nil {
+		optional.TrialExpiration = dbx.User_TrialExpiration(*user.TrialExpiration)
+	}
+
 	createdUser, err := users.db.Create_User(ctx,
 		dbx.User_Id(user.ID[:]),
 		dbx.User_Email(user.Email),
@@ -366,19 +431,24 @@ func (users *users) Update(ctx context.Context, userID uuid.UUID, updateRequest 
 }
 
 // UpdatePaidTier sets whether the user is in the paid tier.
-func (users *users) UpdatePaidTier(ctx context.Context, id uuid.UUID, paidTier bool, projectBandwidthLimit, projectStorageLimit memory.Size, projectSegmentLimit int64, projectLimit int) (err error) {
+func (users *users) UpdatePaidTier(ctx context.Context, id uuid.UUID, paidTier bool, projectBandwidthLimit, projectStorageLimit memory.Size, projectSegmentLimit int64, projectLimit int, upgradeTime *time.Time) (err error) {
 	defer mon.Task()(&ctx)(&err)
+
+	updateFields := dbx.User_Update_Fields{
+		PaidTier:              dbx.User_PaidTier(paidTier),
+		ProjectLimit:          dbx.User_ProjectLimit(projectLimit),
+		ProjectBandwidthLimit: dbx.User_ProjectBandwidthLimit(projectBandwidthLimit.Int64()),
+		ProjectStorageLimit:   dbx.User_ProjectStorageLimit(projectStorageLimit.Int64()),
+		ProjectSegmentLimit:   dbx.User_ProjectSegmentLimit(projectSegmentLimit),
+	}
+	if paidTier && upgradeTime != nil {
+		updateFields.UpgradeTime = dbx.User_UpgradeTime(*upgradeTime)
+	}
 
 	_, err = users.db.Update_User_By_Id(
 		ctx,
 		dbx.User_Id(id[:]),
-		dbx.User_Update_Fields{
-			PaidTier:              dbx.User_PaidTier(paidTier),
-			ProjectLimit:          dbx.User_ProjectLimit(projectLimit),
-			ProjectBandwidthLimit: dbx.User_ProjectBandwidthLimit(projectBandwidthLimit.Int64()),
-			ProjectStorageLimit:   dbx.User_ProjectStorageLimit(projectStorageLimit.Int64()),
-			ProjectSegmentLimit:   dbx.User_ProjectSegmentLimit(projectSegmentLimit),
-		},
+		updateFields,
 	)
 
 	return err
@@ -464,6 +534,18 @@ func (users *users) GetUserPaidTier(ctx context.Context, id uuid.UUID) (isPaid b
 	return row.PaidTier, nil
 }
 
+// GetUpgradeTime is a method for returning a user's upgrade time.
+func (users *users) GetUpgradeTime(ctx context.Context, id uuid.UUID) (*time.Time, error) {
+	var err error
+	defer mon.Task()(&ctx)(&err)
+
+	row, err := users.db.Get_User_UpgradeTime_By_Id(ctx, dbx.User_Id(id[:]))
+	if err != nil {
+		return nil, err
+	}
+	return row.UpgradeTime, nil
+}
+
 // GetSettings is a method for returning a user's set of configurations.
 func (users *users) GetSettings(ctx context.Context, userID uuid.UUID) (settings *console.UserSettings, err error) {
 	defer mon.Task()(&ctx)(&err)
@@ -484,6 +566,11 @@ func (users *users) GetSettings(ctx context.Context, userID uuid.UUID) (settings
 	if row.SessionMinutes != nil {
 		dur := time.Duration(*row.SessionMinutes) * time.Minute
 		settings.SessionDuration = &dur
+	}
+
+	err = json.Unmarshal(row.NoticeDismissal, &settings.NoticeDismissal)
+	if err != nil {
+		return nil, err
 	}
 
 	return settings, nil
@@ -519,6 +606,15 @@ func (users *users) UpsertSettings(ctx context.Context, userID uuid.UUID, settin
 	}
 	if settings.OnboardingStep != nil {
 		update.OnboardingStep = dbx.UserSettings_OnboardingStep(*settings.OnboardingStep)
+		fieldCount++
+	}
+
+	if settings.NoticeDismissal != nil {
+		noticesBytes, err := json.Marshal(settings.NoticeDismissal)
+		if err != nil {
+			return err
+		}
+		update.NoticeDismissal = dbx.UserSettings_NoticeDismissal(noticesBytes)
 		fieldCount++
 	}
 
@@ -633,6 +729,9 @@ func toUpdateUser(request console.UpdateUserRequest) (*dbx.User_Update_Fields, e
 	if request.IsProfessional != nil {
 		update.IsProfessional = dbx.User_IsProfessional(*request.IsProfessional)
 	}
+	if request.HaveSalesContact != nil {
+		update.HaveSalesContact = dbx.User_HaveSalesContact(*request.HaveSalesContact)
+	}
 	if request.Position != nil {
 		update.Position = dbx.User_Position(*request.Position)
 	}
@@ -641,6 +740,13 @@ func toUpdateUser(request console.UpdateUserRequest) (*dbx.User_Update_Fields, e
 	}
 	if request.EmployeeCount != nil {
 		update.EmployeeCount = dbx.User_EmployeeCount(*request.EmployeeCount)
+	}
+
+	if request.TrialExpiration != nil {
+		update.TrialExpiration = dbx.User_TrialExpiration_Raw(*request.TrialExpiration)
+	}
+	if request.UpgradeTime != nil {
+		update.UpgradeTime = dbx.User_UpgradeTime(*request.UpgradeTime)
 	}
 
 	return &update, nil
@@ -682,7 +788,10 @@ func userFromDBX(ctx context.Context, user *dbx.User) (_ *console.User, err erro
 		HaveSalesContact:      user.HaveSalesContact,
 		MFAEnabled:            user.MfaEnabled,
 		VerificationReminders: user.VerificationReminders,
+		TrialNotifications:    user.TrialNotifications,
 		SignupCaptcha:         user.SignupCaptcha,
+		TrialExpiration:       user.TrialExpiration,
+		UpgradeTime:           user.UpgradeTime,
 	}
 
 	if user.DefaultPlacement != nil {

@@ -82,7 +82,6 @@ func TestSegmentRepairPlacement(t *testing.T) {
 			// as segment is still above repair threshold
 			{piecesOutOfPlacement: 1, piecesAfterRepair: piecesCount - 1},
 			{piecesOutOfPlacement: 1, piecesAfterRepair: piecesCount - 1, piecesOutOfPlacementOffline: 1},
-			{piecesOutOfPlacement: 1, piecesAfterRepair: piecesCount - 1, piecesOutOfPlacementOffline: 1},
 		} {
 
 			t.Run(fmt.Sprintf("oop_%d_ar_%d_off_%d", tc.piecesOutOfPlacement, tc.piecesAfterRepair, tc.piecesOutOfPlacementOffline), func(t *testing.T) {
@@ -120,7 +119,7 @@ func TestSegmentRepairPlacement(t *testing.T) {
 
 				// confirm that some pieces are out of placement
 
-				placement, err := planet.Satellites[0].Config.Placement.Parse()
+				placement, err := planet.Satellites[0].Config.Placement.Parse(planet.Satellites[0].Config.Overlay.Node.CreateDefaultPlacement)
 				require.NoError(t, err)
 
 				ok, err := allPiecesInPlacement(ctx, planet.Satellites[0].Overlay.Service, segments[0].Pieces, segments[0].Placement, placement.CreateFilters)
@@ -158,6 +157,49 @@ func TestSegmentRepairPlacement(t *testing.T) {
 	})
 }
 
+func TestSegmentRepairInMemoryUpload(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1, StorageNodeCount: 4, UplinkCount: 1,
+		Reconfigure: testplanet.Reconfigure{
+			Satellite: testplanet.Combine(
+				testplanet.ReconfigureRS(1, 1, 2, 2),
+				func(log *zap.Logger, index int, config *satellite.Config) {
+					config.Repairer.InMemoryUpload = true
+				},
+			),
+		},
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		require.NoError(t, planet.Uplinks[0].CreateBucket(ctx, planet.Satellites[0], "testbucket"))
+
+		expectedData := testrand.Bytes(5 * memory.KiB)
+		err := planet.Uplinks[0].Upload(ctx, planet.Satellites[0], "testbucket", "object", expectedData)
+		require.NoError(t, err)
+
+		segments, err := planet.Satellites[0].Metabase.DB.TestingAllSegments(ctx)
+		require.NoError(t, err)
+		require.Len(t, segments, 1)
+		require.Len(t, segments[0].Pieces, 2)
+
+		require.NoError(t, planet.StopNodeAndUpdate(ctx, planet.FindNode(segments[0].Pieces[0].StorageNode)))
+
+		_, err = planet.Satellites[0].Repairer.SegmentRepairer.Repair(ctx, &queue.InjuredSegment{
+			StreamID: segments[0].StreamID,
+			Position: segments[0].Position,
+		})
+		require.NoError(t, err)
+
+		segmentsAfter, err := planet.Satellites[0].Metabase.DB.TestingAllSegments(ctx)
+		require.NoError(t, err)
+		require.Len(t, segments, 1)
+		require.NotNil(t, segmentsAfter[0].RepairedAt)
+		require.NotEqual(t, segments[0].Pieces, segmentsAfter[0].Pieces)
+
+		data, err := planet.Uplinks[0].Download(ctx, planet.Satellites[0], "testbucket", "object")
+		require.NoError(t, err)
+		require.Equal(t, expectedData, data)
+	})
+}
+
 func TestSegmentRepairWithNodeTags(t *testing.T) {
 	satelliteIdentity := signing.SignerFromFullIdentity(testidentity.MustPregeneratedSignedIdentity(0, storj.LatestIDVersion()))
 	ctx := testcontext.New(t)
@@ -172,7 +214,7 @@ func TestSegmentRepairWithNodeTags(t *testing.T) {
 			Satellite: testplanet.Combine(
 				func(log *zap.Logger, index int, config *satellite.Config) {
 					tag := fmt.Sprintf(`tag("%s","selected","true")`, satelliteIdentity.ID())
-					config.Placement = overlay.ConfigurablePlacementRule{
+					config.Placement = nodeselection.ConfigurablePlacementRule{
 						PlacementRules: fmt.Sprintf("0:exclude(%s);10:%s", tag, tag),
 					}
 				},
@@ -250,7 +292,7 @@ func TestSegmentRepairWithNodeTags(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, segments, 1)
 
-			placement, err := planet.Satellites[0].Config.Placement.Parse()
+			placement, err := planet.Satellites[0].Config.Placement.Parse(planet.Satellites[0].Config.Overlay.Node.CreateDefaultPlacement)
 			require.NoError(t, err)
 
 			require.Equal(t, storj.PlacementConstraint(10), segments[0].Placement)
@@ -358,7 +400,7 @@ func TestSegmentRepairPlacementAndClumped(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		placement, err := planet.Satellites[0].Config.Placement.Parse()
+		placement, err := planet.Satellites[0].Config.Placement.Parse(planet.Satellites[0].Config.Overlay.Node.CreateDefaultPlacement)
 		require.NoError(t, err)
 
 		// confirm that some pieces are out of placement
@@ -464,7 +506,7 @@ func piecesOnNodeByIndex(ctx context.Context, planet *testplanet.Planet, pieces 
 
 }
 
-func allPiecesInPlacement(ctx context.Context, overaly *overlay.Service, pieces metabase.Pieces, placement storj.PlacementConstraint, rules overlay.PlacementRules) (bool, error) {
+func allPiecesInPlacement(ctx context.Context, overaly *overlay.Service, pieces metabase.Pieces, placement storj.PlacementConstraint, rules nodeselection.PlacementRules) (bool, error) {
 	filter := rules(placement)
 	for _, piece := range pieces {
 
@@ -518,7 +560,7 @@ func updateNodeStatus(ctx context.Context, satellite *testplanet.Satellite, node
 // is configured to include only that placement constraint.
 func TestSegmentRepairPlacementRestrictions(t *testing.T) {
 
-	placement := overlay.ConfigurablePlacementRule{}
+	placement := nodeselection.ConfigurablePlacementRule{}
 	err := placement.Set(`1:country("PL");2:country("PL")`)
 	require.NoError(t, err)
 
@@ -541,7 +583,7 @@ func TestSegmentRepairPlacementRestrictions(t *testing.T) {
 		},
 	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
 
-		placement, err := planet.Satellites[0].Config.Placement.Parse()
+		placement, err := planet.Satellites[0].Config.Placement.Parse(planet.Satellites[0].Config.Overlay.Node.CreateDefaultPlacement)
 		require.NoError(t, err)
 
 		{

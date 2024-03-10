@@ -9,11 +9,12 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
+	mathrand "math/rand"
 	"net/http"
-	"net/mail"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,17 +22,16 @@ import (
 
 	"github.com/spacemonkeygo/monkit/v3"
 	"github.com/spf13/pflag"
-	"github.com/stripe/stripe-go/v75"
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 
+	"storj.io/common/cfgstruct"
 	"storj.io/common/currency"
 	"storj.io/common/http/requestid"
 	"storj.io/common/macaroon"
 	"storj.io/common/memory"
 	"storj.io/common/uuid"
-	"storj.io/private/cfgstruct"
 	"storj.io/storj/private/api"
 	"storj.io/storj/private/blockchain"
 	"storj.io/storj/private/post"
@@ -39,7 +39,9 @@ import (
 	"storj.io/storj/satellite/analytics"
 	"storj.io/storj/satellite/buckets"
 	"storj.io/storj/satellite/console/consoleauth"
+	"storj.io/storj/satellite/emission"
 	"storj.io/storj/satellite/mailservice"
+	"storj.io/storj/satellite/nodeselection"
 	"storj.io/storj/satellite/payments"
 	"storj.io/storj/satellite/payments/billing"
 	"storj.io/storj/satellite/satellitedb/dbx"
@@ -49,7 +51,7 @@ var mon = monkit.Package()
 
 const (
 	// maxLimit specifies the limit for all paged queries.
-	maxLimit = 50
+	maxLimit = 300
 
 	// TestPasswordCost is the hashing complexity to use for testing.
 	TestPasswordCost = bcrypt.MinCost
@@ -82,7 +84,7 @@ const (
 	activeProjInviteExistsErrMsg         = "An active invitation for '%s' already exists"
 	projInviteExistsErrMsg               = "An invitation for '%s' already exists"
 	projInviteDoesntExistErrMsg          = "An invitation for '%s' does not exist"
-	newInviteLimitErrMsg                 = "Only one new invitation can be sent at a time"
+	varPartnerInviteErr                  = "Your partner does not support inviting users"
 	paidTierInviteErrMsg                 = "Only paid tier users can invite project members"
 	contactSupportErrMsg                 = "Please contact support"
 )
@@ -164,8 +166,14 @@ var (
 	// ErrNotPaidTier occurs when a user must be paid tier in order to complete an operation.
 	ErrNotPaidTier = errs.Class("user is not paid tier")
 
+	// ErrHasVarPartner occurs when a user's user agent is a var partner for which an operation is not allowed.
+	ErrHasVarPartner = errs.Class("VAR Partner")
+
 	// ErrBotUser occurs when a user must be verified by admin first in order to complete operation.
 	ErrBotUser = errs.Class("user has to be verified by admin first")
+
+	// ErrLoginRestricted occurs when a user with PendingBotVerification or LegalHold status tries to log in.
+	ErrLoginRestricted = errs.Class("user can't be authenticated")
 )
 
 // Service is handling accounts related logic.
@@ -178,6 +186,7 @@ type Service struct {
 	projectAccounting          accounting.ProjectAccounting
 	projectUsage               *accounting.Service
 	buckets                    buckets.DB
+	placements                 nodeselection.PlacementDefinitions
 	accounts                   payments.Accounts
 	depositWallets             payments.DepositWallets
 	billing                    billing.TransactionsDB
@@ -186,12 +195,16 @@ type Service struct {
 	analytics                  *analytics.Service
 	tokens                     *consoleauth.Service
 	mailService                *mailservice.Service
+	accountFreezeService       *AccountFreezeService
+	emission                   *emission.Service
 
 	satelliteAddress string
 	satelliteName    string
 
 	config            Config
 	maxProjectBuckets int
+
+	varPartners map[string]struct{}
 
 	nowFn func() time.Time
 }
@@ -214,7 +227,7 @@ type Payments struct {
 }
 
 // NewService returns new instance of Service.
-func NewService(log *zap.Logger, store DB, restKeys RESTKeys, projectAccounting accounting.ProjectAccounting, projectUsage *accounting.Service, buckets buckets.DB, accounts payments.Accounts, depositWallets payments.DepositWallets, billing billing.TransactionsDB, analytics *analytics.Service, tokens *consoleauth.Service, mailService *mailservice.Service, satelliteAddress string, satelliteName string, maxProjectBuckets int, config Config) (*Service, error) {
+func NewService(log *zap.Logger, store DB, restKeys RESTKeys, projectAccounting accounting.ProjectAccounting, projectUsage *accounting.Service, buckets buckets.DB, accounts payments.Accounts, depositWallets payments.DepositWallets, billing billing.TransactionsDB, analytics *analytics.Service, tokens *consoleauth.Service, mailService *mailservice.Service, accountFreezeService *AccountFreezeService, emission *emission.Service, satelliteAddress string, satelliteName string, maxProjectBuckets int, placements nodeselection.PlacementDefinitions, config Config) (*Service, error) {
 	if store == nil {
 		return nil, errs.New("store can't be nil")
 	}
@@ -242,6 +255,11 @@ func NewService(log *zap.Logger, store DB, restKeys RESTKeys, projectAccounting 
 		loginCaptchaHandler = NewDefaultCaptcha(Hcaptcha, config.Captcha.Login.Hcaptcha.SecretKey)
 	}
 
+	partners := make(map[string]struct{}, len(config.VarPartners))
+	for _, partner := range config.VarPartners {
+		partners[partner] = struct{}{}
+	}
+
 	return &Service{
 		log:                        log,
 		auditLogger:                log.Named("auditlog"),
@@ -250,6 +268,7 @@ func NewService(log *zap.Logger, store DB, restKeys RESTKeys, projectAccounting 
 		projectAccounting:          projectAccounting,
 		projectUsage:               projectUsage,
 		buckets:                    buckets,
+		placements:                 placements,
 		accounts:                   accounts,
 		depositWallets:             depositWallets,
 		billing:                    billing,
@@ -258,10 +277,13 @@ func NewService(log *zap.Logger, store DB, restKeys RESTKeys, projectAccounting 
 		analytics:                  analytics,
 		tokens:                     tokens,
 		mailService:                mailService,
+		accountFreezeService:       accountFreezeService,
+		emission:                   emission,
 		satelliteAddress:           satelliteAddress,
 		satelliteName:              satelliteName,
 		maxProjectBuckets:          maxProjectBuckets,
 		config:                     config,
+		varPartners:                partners,
 		nowFn:                      time.Now,
 	}, nil
 }
@@ -276,7 +298,7 @@ func getRequestingIP(ctx context.Context) (source, forwardedFor string) {
 func (s *Service) auditLog(ctx context.Context, operation string, userID *uuid.UUID, email string, extra ...zap.Field) {
 	sourceIP, forwardedForIP := getRequestingIP(ctx)
 	fields := append(
-		make([]zap.Field, 0, len(extra)+5),
+		make([]zap.Field, 0, len(extra)+6),
 		zap.String("operation", operation),
 		zap.String("source-ip", sourceIP),
 		zap.String("forwarded-for-ip", forwardedForIP),
@@ -291,7 +313,7 @@ func (s *Service) auditLog(ctx context.Context, operation string, userID *uuid.U
 		fields = append(fields, zap.String("requestID", requestID))
 	}
 
-	fields = append(fields, fields...)
+	fields = append(fields, extra...)
 	s.auditLogger.Info("console activity", fields...)
 }
 
@@ -396,11 +418,27 @@ func (payment Payments) AddCardByPaymentMethodID(ctx context.Context, pmID strin
 
 func (payment Payments) upgradeToPaidTier(ctx context.Context, user *User) (err error) {
 	// put this user into the paid tier and convert projects to upgraded limits.
+	now := payment.service.nowFn()
+
+	freeze, err := payment.service.accountFreezeService.Get(ctx, user.ID, TrialExpirationFreeze)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Error.Wrap(err)
+		}
+	}
+	if freeze != nil {
+		err = payment.service.accountFreezeService.TrialExpirationUnfreezeUser(ctx, user.ID)
+		if err != nil {
+			return Error.Wrap(err)
+		}
+	}
+
 	err = payment.service.store.Users().UpdatePaidTier(ctx, user.ID, true,
 		payment.service.config.UsageLimits.Bandwidth.Paid,
 		payment.service.config.UsageLimits.Storage.Paid,
 		payment.service.config.UsageLimits.Segment.Paid,
 		payment.service.config.UsageLimits.Project.Paid,
+		&now,
 	)
 	if err != nil {
 		return Error.Wrap(err)
@@ -587,7 +625,7 @@ func (payment Payments) BillingHistory(ctx context.Context) (billingHistory []*B
 }
 
 // InvoiceHistory returns a paged list of invoices for payment account.
-func (payment Payments) InvoiceHistory(ctx context.Context, cursor BillingHistoryCursor) (history *BillingHistoryPage, err error) {
+func (payment Payments) InvoiceHistory(ctx context.Context, cursor payments.InvoiceCursor) (history *BillingHistoryPage, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	user, err := payment.service.getUserAndAuditLog(ctx, "get invoice history")
@@ -595,11 +633,7 @@ func (payment Payments) InvoiceHistory(ctx context.Context, cursor BillingHistor
 		return nil, Error.Wrap(err)
 	}
 
-	page, err := payment.service.accounts.Invoices().ListPaged(ctx, user.ID, payments.InvoiceCursor{
-		Limit:         cursor.Limit,
-		StartingAfter: cursor.StartingAfter,
-		EndingBefore:  cursor.EndingBefore,
-	})
+	page, err := payment.service.accounts.Invoices().ListPaged(ctx, user.ID, cursor)
 	if err != nil {
 		return nil, Error.Wrap(err)
 	}
@@ -623,37 +657,6 @@ func (payment Payments) InvoiceHistory(ctx context.Context, cursor BillingHistor
 		Next:     page.Next,
 		Previous: page.Previous,
 	}, nil
-}
-
-// checkOutstandingInvoice returns if the payment account has any unpaid/outstanding invoices or/and invoice items.
-func (payment Payments) checkOutstandingInvoice(ctx context.Context) (err error) {
-	defer mon.Task()(&ctx)(&err)
-
-	user, err := payment.service.getUserAndAuditLog(ctx, "get outstanding invoices")
-	if err != nil {
-		return err
-	}
-
-	invoices, err := payment.service.accounts.Invoices().List(ctx, user.ID)
-	if err != nil {
-		return err
-	}
-	if len(invoices) > 0 {
-		for _, invoice := range invoices {
-			if invoice.Status != string(stripe.InvoiceStatusPaid) {
-				return ErrUsage.New("user has unpaid/pending invoices")
-			}
-		}
-	}
-
-	hasItems, err := payment.service.accounts.Invoices().CheckPendingItems(ctx, user.ID)
-	if err != nil {
-		return err
-	}
-	if hasItems {
-		return ErrUsage.New("user has pending invoice items")
-	}
-	return nil
 }
 
 // checkProjectInvoicingStatus returns error if for the given project there are outstanding project records and/or usage
@@ -760,6 +763,7 @@ func (payment Payments) AttemptPayOverdueInvoices(ctx context.Context) (err erro
 
 	err = payment.service.accounts.Invoices().AttemptPayOverdueInvoices(ctx, user.ID)
 	if err != nil {
+		payment.service.log.Warn("error attempting to pay overdue invoices for user", zap.String("user id", user.ID.String()), zap.Error(err))
 		return Error.Wrap(err)
 	}
 
@@ -860,6 +864,11 @@ func (s *Service) CreateUser(ctx context.Context, user CreateUser, tokenSecret R
 			newUser.ProjectLimit = s.config.UsageLimits.Project.Free
 		}
 
+		if s.config.FreeTrialDuration != 0 {
+			expiration := s.nowFn().Add(s.config.FreeTrialDuration)
+			newUser.TrialExpiration = &expiration
+		}
+
 		// TODO: move the project limits into the registration token.
 		newUser.ProjectStorageLimit = s.config.UsageLimits.Storage.Free.Int64()
 		newUser.ProjectBandwidthLimit = s.config.UsageLimits.Bandwidth.Free.Int64()
@@ -956,7 +965,7 @@ func (s *Service) GeneratePasswordRecoveryToken(ctx context.Context, id uuid.UUI
 }
 
 // GenerateSessionToken creates a new session and returns the string representation of its token.
-func (s *Service) GenerateSessionToken(ctx context.Context, userID uuid.UUID, email, ip, userAgent string) (_ *TokenInfo, err error) {
+func (s *Service) GenerateSessionToken(ctx context.Context, userID uuid.UUID, email, ip, userAgent string, customDuration *time.Duration) (_ *TokenInfo, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	sessionID, err := uuid.New()
@@ -965,7 +974,9 @@ func (s *Service) GenerateSessionToken(ctx context.Context, userID uuid.UUID, em
 	}
 
 	duration := s.config.Session.Duration
-	if s.config.Session.InactivityTimerEnabled {
+	if customDuration != nil {
+		duration = *customDuration
+	} else if s.config.Session.InactivityTimerEnabled {
 		settings, err := s.store.Users().GetSettings(ctx, userID)
 		if err != nil && !errs.Is(err, sql.ErrNoRows) {
 			return nil, Error.Wrap(err)
@@ -1050,13 +1061,21 @@ func (s *Service) ActivateAccount(ctx context.Context, activationToken string) (
 func (s *Service) SetAccountActive(ctx context.Context, user *User) (err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	status := Active
 	if s.config.Captcha.FlagBotsEnabled && user.SignupCaptcha != nil && *user.SignupCaptcha >= s.config.Captcha.ScoreCutoffThreshold {
-		status = PendingBotVerification
+		minDelay := s.config.Captcha.MinFlagBotDelay
+		maxDelay := s.config.Captcha.MaxFlagBotDelay
+		rng := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
+		days := rng.Intn(maxDelay-minDelay+1) + minDelay
+
+		err = s.accountFreezeService.DelayedBotFreezeUser(ctx, user.ID, &days)
+		if err != nil {
+			return Error.Wrap(err)
+		}
 	}
 
+	activeStatus := Active
 	err = s.store.Users().Update(ctx, user.ID, UpdateUserRequest{
-		Status: &status,
+		Status: &activeStatus,
 	})
 	if err != nil {
 		return Error.Wrap(err)
@@ -1213,17 +1232,17 @@ func (s *Service) Token(ctx context.Context, request AuthUser) (response *TokenI
 
 	user, nonActiveUsers, err := s.store.Users().GetByEmailWithUnverified(ctx, request.Email)
 	if user == nil {
-		isBotAccount := false
+		shouldProceed := false
 		for _, usr := range nonActiveUsers {
-			if usr.Status == PendingBotVerification {
-				isBotAccount = true
+			if usr.Status == PendingBotVerification || usr.Status == LegalHold {
+				shouldProceed = true
 				botAccount := usr
 				user = &botAccount
 				break
 			}
 		}
 
-		if !isBotAccount {
+		if !shouldProceed {
 			if len(nonActiveUsers) > 0 {
 				mon.Counter("login_email_unverified").Inc(1) //mon:locked
 				s.auditLog(ctx, "login: failed email unverified", nil, request.Email)
@@ -1352,7 +1371,16 @@ func (s *Service) Token(ctx context.Context, request AuthUser) (response *TokenI
 		}
 	}
 
-	response, err = s.GenerateSessionToken(ctx, user.ID, user.Email, request.IP, request.UserAgent)
+	if user.Status == PendingBotVerification || user.Status == LegalHold {
+		return nil, ErrLoginRestricted.New("")
+	}
+
+	var customDurationPtr *time.Duration
+	if request.RememberForOneWeek {
+		weekDuration := 7 * 24 * time.Hour
+		customDurationPtr = &weekDuration
+	}
+	response, err = s.GenerateSessionToken(ctx, user.ID, user.Email, request.IP, request.UserAgent, customDurationPtr)
 	if err != nil {
 		return nil, err
 	}
@@ -1376,7 +1404,7 @@ func (s *Service) TokenByAPIKey(ctx context.Context, userAgent string, ip string
 		return nil, Error.New(failedToRetrieveUserErrMsg)
 	}
 
-	response, err = s.GenerateSessionToken(ctx, user.ID, user.Email, ip, userAgent)
+	response, err = s.GenerateSessionToken(ctx, user.ID, user.Email, ip, userAgent, nil)
 	if err != nil {
 		return nil, Error.New(generateSessionTokenErrMsg)
 	}
@@ -1402,7 +1430,6 @@ func (s *Service) UpdateUsersFailedLoginState(ctx context.Context, user *User) (
 			ctx,
 			[]post.Address{{Address: user.Email, Name: user.FullName}},
 			&LockAccountEmail{
-				Name:              user.FullName,
 				LockoutDuration:   lockoutDuration,
 				ResetPasswordLink: address + "forgot-password",
 			},
@@ -1484,6 +1511,20 @@ func (s *Service) GetUserByEmailWithUnverified(ctx context.Context, email string
 	return verified, unverified, err
 }
 
+// GetUserHasVarPartner returns whether the user in context is associated with a VAR partner.
+func (s *Service) GetUserHasVarPartner(ctx context.Context) (has bool, err error) {
+	defer mon.Task()(&ctx)(&err)
+	user, err := s.getUserAndAuditLog(ctx, "get user has VAR partner")
+	if err != nil {
+		return false, Error.Wrap(err)
+	}
+
+	if _, has = s.varPartners[string(user.UserAgent)]; has {
+		return has, nil
+	}
+	return false, nil
+}
+
 // UpdateAccount updates User.
 func (s *Service) UpdateAccount(ctx context.Context, fullName string, shortName string) (err error) {
 	defer mon.Task()(&ctx)(&err)
@@ -1527,48 +1568,49 @@ func (s *Service) SetupAccount(ctx context.Context, requestData SetUpAccountRequ
 	}
 
 	err = s.store.Users().Update(ctx, user.ID, UpdateUserRequest{
-		FullName:       &requestData.FullName,
-		IsProfessional: &requestData.IsProfessional,
-		Position:       requestData.Position,
-		CompanyName:    requestData.CompanyName,
-		EmployeeCount:  requestData.EmployeeCount,
+		FullName:         &requestData.FullName,
+		IsProfessional:   &requestData.IsProfessional,
+		HaveSalesContact: &requestData.HaveSalesContact,
+		Position:         requestData.Position,
+		CompanyName:      requestData.CompanyName,
+		EmployeeCount:    requestData.EmployeeCount,
 	})
 	if err != nil {
 		return Error.Wrap(err)
 	}
 
-	// TODO: track setup account
-
-	return nil
-}
-
-// ChangeEmail updates email for a given user.
-func (s *Service) ChangeEmail(ctx context.Context, newEmail string) (err error) {
-	defer mon.Task()(&ctx)(&err)
-	user, err := s.getUserAndAuditLog(ctx, "change email")
-	if err != nil {
-		return Error.Wrap(err)
+	onboardingFields := analytics.TrackOnboardingInfoFields{
+		ID:       user.ID,
+		FullName: requestData.FullName,
+		Email:    user.Email,
 	}
 
-	if _, err := mail.ParseAddress(newEmail); err != nil {
-		return ErrValidation.Wrap(err)
+	if requestData.StorageUseCase != nil {
+		onboardingFields.StorageUseCase = *requestData.StorageUseCase
 	}
 
-	verified, unverified, err := s.store.Users().GetByEmailWithUnverified(ctx, newEmail)
-	if err != nil {
-		return Error.Wrap(err)
+	if requestData.IsProfessional {
+		onboardingFields.Type = analytics.Professional
+		onboardingFields.HaveSalesContact = requestData.HaveSalesContact
+		if requestData.CompanyName != nil {
+			onboardingFields.CompanyName = *requestData.CompanyName
+		}
+		if requestData.EmployeeCount != nil {
+			onboardingFields.EmployeeCount = *requestData.EmployeeCount
+		}
+		if requestData.StorageNeeds != nil {
+			onboardingFields.StorageNeeds = *requestData.StorageNeeds
+		}
+		if requestData.Position != nil {
+			onboardingFields.JobTitle = *requestData.Position
+		}
+		if requestData.FunctionalArea != nil {
+			onboardingFields.FunctionalArea = *requestData.FunctionalArea
+		}
+	} else {
+		onboardingFields.Type = analytics.Personal
 	}
-	if verified != nil || len(unverified) != 0 {
-		return ErrEmailUsed.New(emailUsedErrMsg)
-	}
-
-	user.Email = newEmail
-	err = s.store.Users().Update(ctx, user.ID, UpdateUserRequest{
-		Email: &user.Email,
-	})
-	if err != nil {
-		return Error.Wrap(err)
-	}
+	s.analytics.TrackUserOnboardingInfo(onboardingFields)
 
 	return nil
 }
@@ -1612,32 +1654,6 @@ func (s *Service) ChangePassword(ctx context.Context, pass, newPass string) (err
 	}
 
 	_, err = s.store.WebappSessions().DeleteAllByUserID(ctx, user.ID)
-	if err != nil {
-		return Error.Wrap(err)
-	}
-
-	return nil
-}
-
-// DeleteAccount deletes User.
-func (s *Service) DeleteAccount(ctx context.Context, password string) (err error) {
-	defer mon.Task()(&ctx)(&err)
-	user, err := s.getUserAndAuditLog(ctx, "delete account")
-	if err != nil {
-		return Error.Wrap(err)
-	}
-
-	err = bcrypt.CompareHashAndPassword(user.PasswordHash, []byte(password))
-	if err != nil {
-		return ErrUnauthorized.New(credentialsErrMsg)
-	}
-
-	err = s.Payments().checkOutstandingInvoice(ctx)
-	if err != nil {
-		return Error.Wrap(err)
-	}
-
-	err = s.store.Users().Delete(ctx, user.ID)
 	if err != nil {
 		return Error.Wrap(err)
 	}
@@ -1701,6 +1717,59 @@ func (s *Service) GetSalt(ctx context.Context, projectID uuid.UUID) (salt []byte
 	return s.store.Projects().GetSalt(ctx, isMember.project.ID)
 }
 
+// EmissionImpactResponse represents emission impact response to be returned to client.
+type EmissionImpactResponse struct {
+	StorjImpact       float64 `json:"storjImpact"`
+	HyperscalerImpact float64 `json:"hyperscalerImpact"`
+	SavedTrees        int64   `json:"savedTrees"`
+}
+
+// GetEmissionImpact is a method for querying project emission impact by id.
+func (s *Service) GetEmissionImpact(ctx context.Context, projectID uuid.UUID) (*EmissionImpactResponse, error) {
+	var err error
+	defer mon.Task()(&ctx)(&err)
+	user, err := s.getUserAndAuditLog(ctx, "get project emission impact", zap.String("projectID", projectID.String()))
+	if err != nil {
+		return nil, ErrUnauthorized.Wrap(err)
+	}
+
+	isMember, err := s.isProjectMember(ctx, user.ID, projectID)
+	if err != nil {
+		return nil, ErrNoMembership.Wrap(err)
+	}
+
+	storageUsed, err := s.projectUsage.GetProjectStorageTotals(ctx, isMember.project.ID)
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	now := s.nowFn()
+	period := now.Sub(isMember.project.CreatedAt)
+	dataInTB := memory.Size(storageUsed).TB()
+
+	impact, err := s.emission.CalculateImpact(&emission.CalculationInput{
+		AmountOfDataInTB: dataInTB,
+		Duration:         period,
+		IsTBDuration:     false,
+	})
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	savedValue := impact.EstimatedKgCO2eHyperscaler - impact.EstimatedKgCO2eStorj
+	if savedValue < 0 {
+		savedValue = 0
+	}
+
+	savedTrees := s.emission.CalculateSavedTrees(savedValue)
+
+	return &EmissionImpactResponse{
+		StorjImpact:       impact.EstimatedKgCO2eStorj,
+		HyperscalerImpact: impact.EstimatedKgCO2eHyperscaler,
+		SavedTrees:        savedTrees,
+	}, nil
+}
+
 // GetUsersProjects is a method for querying all projects.
 func (s *Service) GetUsersProjects(ctx context.Context) (ps []Project, err error) {
 	defer mon.Task()(&ctx)(&err)
@@ -1714,18 +1783,28 @@ func (s *Service) GetUsersProjects(ctx context.Context) (ps []Project, err error
 		return nil, Error.Wrap(err)
 	}
 
+	for i, project := range ps {
+		project.StorageUsed, project.BandwidthUsed, err = s.getStorageAndBandwidthUse(ctx, project.ID)
+		if err != nil {
+			return nil, Error.Wrap(err)
+		}
+		ps[i] = project
+	}
+
 	return
 }
 
 // GetMinimalProject returns a ProjectInfo copy of a project.
 func (s *Service) GetMinimalProject(project *Project) ProjectInfo {
 	info := ProjectInfo{
-		ID:          project.PublicID,
-		Name:        project.Name,
-		OwnerID:     project.OwnerID,
-		Description: project.Description,
-		MemberCount: project.MemberCount,
-		CreatedAt:   project.CreatedAt,
+		ID:            project.PublicID,
+		Name:          project.Name,
+		OwnerID:       project.OwnerID,
+		Description:   project.Description,
+		MemberCount:   project.MemberCount,
+		CreatedAt:     project.CreatedAt,
+		StorageUsed:   project.StorageUsed,
+		BandwidthUsed: project.BandwidthUsed,
 	}
 
 	if edgeURLs, ok := s.config.PlacementEdgeURLOverrides.Get(project.DefaultPlacement); ok {
@@ -1999,15 +2078,15 @@ func (s *Service) UpdateProject(ctx context.Context, projectID uuid.UUID, update
 			return nil, Error.New("current storage limit for project is set to 0 (updating disabled)")
 		}
 		if updatedProject.StorageLimit <= 0 || updatedProject.BandwidthLimit <= 0 {
-			return nil, Error.New("project limits must be greater than 0")
+			return nil, ErrInvalidProjectLimit.New("Project limits must be greater than 0")
 		}
 
 		if updatedProject.StorageLimit > s.config.UsageLimits.Storage.Paid && updatedProject.StorageLimit > *project.StorageLimit {
-			return nil, Error.New("specified storage limit exceeds allowed maximum for current tier")
+			return nil, ErrInvalidProjectLimit.New("Specified storage limit exceeds allowed maximum for current tier")
 		}
 
 		if updatedProject.BandwidthLimit > s.config.UsageLimits.Bandwidth.Paid && updatedProject.BandwidthLimit > *project.BandwidthLimit {
-			return nil, Error.New("specified bandwidth limit exceeds allowed maximum for current tier")
+			return nil, ErrInvalidProjectLimit.New("Specified bandwidth limit exceeds allowed maximum for current tier")
 		}
 
 		storageUsed, err := s.projectUsage.GetProjectStorageTotals(ctx, project.ID)
@@ -2015,7 +2094,7 @@ func (s *Service) UpdateProject(ctx context.Context, projectID uuid.UUID, update
 			return nil, Error.Wrap(err)
 		}
 		if updatedProject.StorageLimit.Int64() < storageUsed {
-			return nil, Error.New("cannot set storage limit below current usage")
+			return nil, ErrInvalidProjectLimit.New("Cannot set storage limit below current usage")
 		}
 
 		bandwidthUsed, err := s.projectUsage.GetProjectBandwidthTotals(ctx, project.ID)
@@ -2023,7 +2102,7 @@ func (s *Service) UpdateProject(ctx context.Context, projectID uuid.UUID, update
 			return nil, Error.Wrap(err)
 		}
 		if updatedProject.BandwidthLimit.Int64() < bandwidthUsed {
-			return nil, Error.New("cannot set bandwidth limit below current usage")
+			return nil, ErrInvalidProjectLimit.New("Cannot set bandwidth limit below current usage")
 		}
 		/*
 			The purpose of userSpecifiedBandwidthLimit and userSpecifiedStorageLimit is to know if a user has set a bandwidth
@@ -2787,6 +2866,15 @@ func (s *Service) GetBucketTotals(ctx context.Context, projectID uuid.UUID, curs
 		return nil, Error.Wrap(err)
 	}
 
+	if usage == nil {
+		return usage, nil
+	}
+
+	for i := range usage.BucketUsages {
+		placementID := usage.BucketUsages[i].DefaultPlacement
+		usage.BucketUsages[i].Location = s.placements[placementID].Name
+	}
+
 	return usage, nil
 }
 
@@ -2821,6 +2909,48 @@ func (s *Service) GetAllBucketNames(ctx context.Context, projectID uuid.UUID) (_
 	var list []string
 	for _, bucket := range bucketsList.Items {
 		list = append(list, bucket.Name)
+	}
+
+	return list, nil
+}
+
+// GetBucketPlacements retrieves all bucket names and placements of a specific project.
+// projectID here may be Project.ID or Project.PublicID.
+func (s *Service) GetBucketPlacements(ctx context.Context, projectID uuid.UUID) (_ []BucketPlacement, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	user, err := s.getUserAndAuditLog(ctx, "get all bucket names and placements", zap.String("projectID", projectID.String()))
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	isMember, err := s.isProjectMember(ctx, user.ID, projectID)
+	if err != nil {
+		return nil, ErrUnauthorized.Wrap(err)
+	}
+
+	listOptions := buckets.ListOptions{
+		Direction: buckets.DirectionForward,
+	}
+
+	allowedBuckets := macaroon.AllowedBuckets{
+		All: true,
+	}
+
+	bucketsList, err := s.buckets.ListBuckets(ctx, isMember.project.ID, listOptions, allowedBuckets)
+	if err != nil {
+		return nil, Error.Wrap(err)
+	}
+
+	var list []BucketPlacement
+	for _, bucket := range bucketsList.Items {
+		list = append(list, BucketPlacement{
+			bucket.Name,
+			Placement{
+				DefaultPlacement: bucket.Placement,
+				Location:         s.placements[bucket.Placement].Name,
+			},
+		})
 	}
 
 	return list, nil
@@ -3059,6 +3189,23 @@ func (s *Service) GetTotalUsageLimits(ctx context.Context) (_ *ProjectUsageLimit
 		StorageUsed:    totalStorageUsed,
 		BandwidthUsed:  totalBandwidthUsed,
 	}, nil
+}
+
+func (s *Service) getStorageAndBandwidthUse(ctx context.Context, projectID uuid.UUID) (storage, bandwidth int64, err error) {
+	defer mon.Task()(&ctx)(&err)
+
+	storage, err = s.projectUsage.GetProjectStorageTotals(ctx, projectID)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	now := s.nowFn()
+	bandwidth, err = s.projectUsage.GetProjectBandwidth(ctx, projectID, now.Year(), now.Month(), now.Day())
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return storage, bandwidth, nil
 }
 
 func (s *Service) getProjectUsageLimits(ctx context.Context, projectID uuid.UUID, getBandwidthTotals bool) (_ *ProjectUsageLimits, err error) {
@@ -3493,7 +3640,7 @@ func (payment Payments) WalletPayments(ctx context.Context) (_ WalletPayments, e
 			return WalletPayments{}, Error.Wrap(err)
 		}
 		paymentInfos = append(paymentInfos, PaymentInfo{
-			ID:        fmt.Sprintf("%s#%d", meta.ReferenceID, meta.LogIndex),
+			ID:        fmt.Sprint(txn.ID),
 			Type:      txn.Source,
 			Wallet:    address.Hex(),
 			Amount:    txn.Amount,
@@ -3932,7 +4079,7 @@ func (s *Service) InviteNewProjectMember(ctx context.Context, projectID uuid.UUI
 	user, err := s.getUserAndAuditLog(ctx,
 		"invite project member",
 		zap.String("projectID", projectID.String()),
-		zap.String("email", email),
+		zap.String("invitedEmail", email),
 	)
 	if err != nil {
 		return nil, Error.Wrap(err)
@@ -3958,6 +4105,9 @@ func (s *Service) inviteProjectMembers(ctx context.Context, sender *User, projec
 	projectID = isMember.project.ID
 
 	if s.config.BillingFeaturesEnabled && !(s.config.FreeTierInvitesEnabled || sender.PaidTier) {
+		if _, ok := s.varPartners[string(sender.UserAgent)]; ok {
+			return nil, ErrHasVarPartner.New(varPartnerInviteErr)
+		}
 		return nil, ErrNotPaidTier.New(paidTierInviteErrMsg)
 	}
 

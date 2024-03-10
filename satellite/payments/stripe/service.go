@@ -28,6 +28,7 @@ import (
 	"storj.io/storj/satellite/accounting"
 	"storj.io/storj/satellite/analytics"
 	"storj.io/storj/satellite/console"
+	"storj.io/storj/satellite/emission"
 	"storj.io/storj/satellite/payments"
 	"storj.io/storj/satellite/payments/billing"
 	"storj.io/storj/satellite/payments/storjscan"
@@ -60,6 +61,7 @@ type Config struct {
 	MaxParallelCalls       int    `help:"the maximum number of concurrent Stripe API calls in invoicing methods" default:"10"`
 	RemoveExpiredCredit    bool   `help:"whether to remove expired package credit or not" default:"true"`
 	UseIdempotency         bool   `help:"whether to use idempotency for create/update requests" default:"false"`
+	EnableFreeTrialLogic   bool   `help:"whether to use users upgrade time and skip free tier status in billing process" default:"false"`
 	Retries                RetryConfig
 }
 
@@ -79,6 +81,7 @@ type Service struct {
 	stripeClient Client
 
 	analytics *analytics.Service
+	emission  *emission.Service
 
 	usagePrices         payments.ProjectUsagePriceModel
 	usagePriceOverrides map[string]payments.ProjectUsagePriceModel
@@ -92,16 +95,17 @@ type Service struct {
 	// Stripe Extended Features
 	AutoAdvance bool
 
-	listingLimit        int
-	skipEmptyInvoices   bool
-	maxParallelCalls    int
-	removeExpiredCredit bool
-	useIdempotency      bool
-	nowFn               func() time.Time
+	listingLimit         int
+	skipEmptyInvoices    bool
+	maxParallelCalls     int
+	removeExpiredCredit  bool
+	useIdempotency       bool
+	enableFreeTrialLogic bool
+	nowFn                func() time.Time
 }
 
 // NewService creates a Service instance.
-func NewService(log *zap.Logger, stripeClient Client, config Config, db DB, walletsDB storjscan.WalletsDB, billingDB billing.TransactionsDB, projectsDB console.Projects, usersDB console.Users, usageDB accounting.ProjectAccounting, usagePrices payments.ProjectUsagePriceModel, usagePriceOverrides map[string]payments.ProjectUsagePriceModel, packagePlans map[string]payments.PackagePlan, bonusRate int64, analyticsService *analytics.Service) (*Service, error) {
+func NewService(log *zap.Logger, stripeClient Client, config Config, db DB, walletsDB storjscan.WalletsDB, billingDB billing.TransactionsDB, projectsDB console.Projects, usersDB console.Users, usageDB accounting.ProjectAccounting, usagePrices payments.ProjectUsagePriceModel, usagePriceOverrides map[string]payments.ProjectUsagePriceModel, packagePlans map[string]payments.PackagePlan, bonusRate int64, analyticsService *analytics.Service, emissionService *emission.Service) (*Service, error) {
 	var partners []string
 	for partner := range usagePriceOverrides {
 		partners = append(partners, partner)
@@ -117,6 +121,7 @@ func NewService(log *zap.Logger, stripeClient Client, config Config, db DB, wall
 		usageDB:                usageDB,
 		stripeClient:           stripeClient,
 		analytics:              analyticsService,
+		emission:               emissionService,
 		usagePrices:            usagePrices,
 		usagePriceOverrides:    usagePriceOverrides,
 		packagePlans:           packagePlans,
@@ -129,6 +134,7 @@ func NewService(log *zap.Logger, stripeClient Client, config Config, db DB, wall
 		maxParallelCalls:       config.MaxParallelCalls,
 		removeExpiredCredit:    config.RemoveExpiredCredit,
 		useIdempotency:         config.UseIdempotency,
+		enableFreeTrialLogic:   config.EnableFreeTrialLogic,
 		nowFn:                  time.Now,
 	}, nil
 }
@@ -183,9 +189,9 @@ func (service *Service) processCustomers(ctx context.Context, customers []Custom
 	var regularRecords []CreateProjectRecord
 	var recordsToAggregate []CreateProjectRecord
 	for _, customer := range customers {
-		if inactive, err := service.isUserInactive(ctx, customer.UserID); err != nil {
-			return 0, Error.New("unable to determine if user is inactive: %w", err)
-		} else if inactive {
+		if skip, err := service.mustSkipUser(ctx, customer.UserID); err != nil {
+			return 0, Error.New("unable to determine if user must be skipped: %w", err)
+		} else if skip {
 			continue
 		}
 
@@ -194,7 +200,7 @@ func (service *Service) processCustomers(ctx context.Context, customers []Custom
 			return 0, Error.New("unable to get own projects: %w", err)
 		}
 
-		records, err := service.createProjectRecords(ctx, customer.ID, projects, start, end)
+		records, err := service.createProjectRecords(ctx, &customer, projects, start, end)
 		if err != nil {
 			return 0, Error.New("unable to create project records: %w", err)
 		}
@@ -228,7 +234,7 @@ func (service *Service) processCustomers(ctx context.Context, customers []Custom
 }
 
 // createProjectRecords creates invoice project record if none exists.
-func (service *Service) createProjectRecords(ctx context.Context, customerID string, projects []console.Project, start, end time.Time) (_ []CreateProjectRecord, err error) {
+func (service *Service) createProjectRecords(ctx context.Context, customer *Customer, projects []console.Project, start, end time.Time) (_ []CreateProjectRecord, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	var records []CreateProjectRecord
@@ -239,14 +245,22 @@ func (service *Service) createProjectRecords(ctx context.Context, customerID str
 
 		if err = service.db.ProjectRecords().Check(ctx, project.ID, start, end); err != nil {
 			if errors.Is(err, ErrProjectRecordExists) {
-				service.log.Warn("Record for this project already exists.", zap.String("Customer ID", customerID), zap.String("Project ID", project.ID.String()))
+				service.log.Warn("Record for this project already exists.", zap.String("Customer ID", customer.ID), zap.String("Project ID", project.ID.String()))
 				continue
 			}
 
 			return nil, err
 		}
 
-		usage, err := service.usageDB.GetProjectTotal(ctx, project.ID, start, end)
+		from := start
+		if service.enableFreeTrialLogic {
+			from, err = service.getFromDate(ctx, customer.UserID, start, end)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		usage, err := service.usageDB.GetProjectTotal(ctx, project.ID, from, end)
 		if err != nil {
 			return nil, err
 		}
@@ -517,9 +531,9 @@ func (service *Service) applyProjectRecords(ctx context.Context, records []Proje
 			return 0, errs.Wrap(err)
 		}
 
-		if inactive, err := service.isUserInactive(ctx, proj.OwnerID); err != nil {
+		if skip, err := service.mustSkipUser(ctx, proj.OwnerID); err != nil {
 			return 0, errs.Wrap(err)
-		} else if inactive {
+		} else if skip {
 			mu.Lock()
 			skipCount++
 			mu.Unlock()
@@ -538,7 +552,7 @@ func (service *Service) applyProjectRecords(ctx context.Context, records []Proje
 
 		record := record
 		limiter.Go(ctx, func() {
-			skipped, err := service.createInvoiceItems(ctx, cusID, proj.Name, record, period)
+			skipped, err := service.createInvoiceItems(ctx, cusID, proj.Name, record, proj.OwnerID, period)
 			if err != nil {
 				mu.Lock()
 				errGrp.Add(errs.Wrap(err))
@@ -573,9 +587,9 @@ func (service *Service) applyToBeAggregatedProjectRecords(ctx context.Context, r
 			return 0, errs.Wrap(err)
 		}
 
-		if inactive, err := service.isUserInactive(ctx, proj.OwnerID); err != nil {
+		if skip, err := service.mustSkipUser(ctx, proj.OwnerID); err != nil {
 			return 0, errs.Wrap(err)
-		} else if inactive {
+		} else if skip {
 			skipCount++
 			continue
 		}
@@ -591,7 +605,7 @@ func (service *Service) applyToBeAggregatedProjectRecords(ctx context.Context, r
 		}
 
 		record := record
-		skipped, err := service.processProjectRecord(ctx, cusID, proj.Name, record, period)
+		skipped, err := service.processProjectRecord(ctx, cusID, proj.Name, record, proj.OwnerID, period)
 		if err != nil {
 			return 0, errs.Wrap(err)
 		}
@@ -604,7 +618,7 @@ func (service *Service) applyToBeAggregatedProjectRecords(ctx context.Context, r
 }
 
 // createInvoiceItems creates invoice line items for stripe customer.
-func (service *Service) createInvoiceItems(ctx context.Context, cusID, projName string, record ProjectRecord, period time.Time) (skipped bool, err error) {
+func (service *Service) createInvoiceItems(ctx context.Context, cusID, projName string, record ProjectRecord, userID uuid.UUID, period time.Time) (skipped bool, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	if !service.useIdempotency {
@@ -623,7 +637,15 @@ func (service *Service) createInvoiceItems(ctx context.Context, cusID, projName 
 		return true, nil
 	}
 
-	usages, err := service.usageDB.GetProjectTotalByPartner(ctx, record.ProjectID, service.partnerNames, record.PeriodStart, record.PeriodEnd)
+	from := record.PeriodStart
+	if service.enableFreeTrialLogic {
+		from, err = service.getFromDate(ctx, userID, record.PeriodStart, record.PeriodEnd)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	usages, err := service.usageDB.GetProjectTotalByPartner(ctx, record.ProjectID, service.partnerNames, from, record.PeriodEnd)
 	if err != nil {
 		return false, err
 	}
@@ -664,7 +686,7 @@ const (
 )
 
 // processProjectRecord creates or updates invoice line items for stripe customer.
-func (service *Service) processProjectRecord(ctx context.Context, cusID, projName string, record ProjectRecord, period time.Time) (skipped bool, err error) {
+func (service *Service) processProjectRecord(ctx context.Context, cusID, projName string, record ProjectRecord, userID uuid.UUID, period time.Time) (skipped bool, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	if !service.useIdempotency {
@@ -683,7 +705,15 @@ func (service *Service) processProjectRecord(ctx context.Context, cusID, projNam
 		return true, nil
 	}
 
-	usages, err := service.usageDB.GetProjectTotalByPartner(ctx, record.ProjectID, service.partnerNames, record.PeriodStart, record.PeriodEnd)
+	from := record.PeriodStart
+	if service.enableFreeTrialLogic {
+		from, err = service.getFromDate(ctx, userID, record.PeriodStart, record.PeriodEnd)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	usages, err := service.usageDB.GetProjectTotalByPartner(ctx, record.ProjectID, service.partnerNames, from, record.PeriodEnd)
 	if err != nil {
 		return false, err
 	}
@@ -966,12 +996,12 @@ func (service *Service) ApplyFreeTierCoupons(ctx context.Context) (err error) {
 		for _, c := range customersPage.Customers {
 			c := c
 			limiter.Go(ctx, func() {
-				if inactive, err := service.isUserInactive(ctx, c.UserID); err != nil {
+				if skip, err := service.mustSkipUser(ctx, c.UserID); err != nil {
 					mu.Lock()
 					failedUsers = append(failedUsers, c.ID)
 					mu.Unlock()
 					return
-				} else if inactive {
+				} else if skip {
 					return
 				}
 
@@ -1031,7 +1061,7 @@ func (service *Service) applyFreeTierCoupon(ctx context.Context, cusID string) (
 }
 
 // CreateInvoices lists through all customers, removes expired credit if applicable, and creates invoices.
-func (service *Service) CreateInvoices(ctx context.Context, period time.Time) (err error) {
+func (service *Service) CreateInvoices(ctx context.Context, period time.Time, includeEmissionInfo bool) (err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	now := service.nowFn().UTC()
@@ -1062,7 +1092,7 @@ func (service *Service) CreateInvoices(ctx context.Context, period time.Time) (e
 			}
 		}
 
-		scheduled, draft, err := service.createInvoices(ctx, cusPage.Customers, start)
+		scheduled, draft, err := service.createInvoices(ctx, cusPage.Customers, start, includeEmissionInfo)
 		if err != nil {
 			return Error.Wrap(err)
 		}
@@ -1080,24 +1110,104 @@ func (service *Service) CreateInvoices(ctx context.Context, period time.Time) (e
 }
 
 // createInvoice creates invoice for Stripe customer.
-func (service *Service) createInvoice(ctx context.Context, cusID string, period time.Time) (stripeInvoice *stripe.Invoice, err error) {
+func (service *Service) createInvoice(ctx context.Context, cusID string, period time.Time, includeEmissionInfo bool) (stripeInvoice *stripe.Invoice, err error) {
 	defer mon.Task()(&ctx)(&err)
 
-	itemsIter := service.stripeClient.InvoiceItems().List(&stripe.InvoiceItemListParams{
-		Customer: &cusID,
-		Pending:  stripe.Bool(true),
-		ListParams: stripe.ListParams{
-			Context: ctx,
-			Limit:   stripe.Int64(1),
-		},
-	})
+	var footer *string
 
-	hasItems := itemsIter.Next()
-	if err = itemsIter.Err(); err != nil {
-		return nil, err
-	}
-	if !hasItems {
-		return nil, nil
+	if includeEmissionInfo {
+		var (
+			lastItemID   string
+			totalStorage int64
+			hasItems     bool
+		)
+
+		for {
+			params := &stripe.InvoiceItemListParams{
+				Customer: &cusID,
+				Pending:  stripe.Bool(true),
+				ListParams: stripe.ListParams{
+					Context: ctx,
+					Limit:   stripe.Int64(100), // Max limit per request
+				},
+			}
+			if lastItemID != "" {
+				params.ListParams.StartingAfter = stripe.String(lastItemID)
+			}
+
+			itemsIter := service.stripeClient.InvoiceItems().List(params)
+			for itemsIter.Next() {
+				if !hasItems {
+					hasItems = true
+				}
+
+				item := itemsIter.InvoiceItem()
+				if strings.Contains(item.Description, storageInvoiceItemDesc) {
+					totalStorage += item.Quantity
+				}
+
+				lastItemID = item.ID
+			}
+
+			if err = itemsIter.Err(); err != nil {
+				return nil, err
+			}
+			if !hasItems {
+				return nil, nil
+			}
+
+			// Use HasMore to determine if we should break the loop.
+			if !itemsIter.InvoiceItemList().HasMore {
+				break
+			}
+		}
+
+		impact, err := service.emission.CalculateImpact(&emission.CalculationInput{
+			AmountOfDataInTB: float64(totalStorage * hoursPerMonth / 1000000), // convert MB-month to TB-hour.
+			Duration:         time.Hour * hoursPerMonth,
+			IsTBDuration:     true,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		whitePaperLink := "https://www.storj.io/documents/storj-sustainability-whitepaper.pdf"
+		footerMsg := fmt.Sprintf(
+			"Estimated Storj Emissions: %.3f kgCO2e\nEstimated Hyperscaler Emissions: %.3f kgCO2e\nMore information on estimates: %s",
+			impact.EstimatedKgCO2eStorj,
+			impact.EstimatedKgCO2eHyperscaler,
+			whitePaperLink,
+		)
+
+		savedValue := impact.EstimatedKgCO2eHyperscaler - impact.EstimatedKgCO2eStorj
+		if savedValue < 0 {
+			savedValue = 0
+		}
+
+		savedTrees := service.emission.CalculateSavedTrees(savedValue)
+		if savedTrees > 0 {
+			treesCalcLink := "https://www.epa.gov/energy/greenhouse-gases-equivalencies-calculator-calculations-and-references#seedlings"
+			footerMsg += fmt.Sprintf("\nEstimated Trees Saved: %d\nMore information on trees saved: %s", savedTrees, treesCalcLink)
+		}
+
+		footer = stripe.String(footerMsg)
+	} else {
+		itemsIter := service.stripeClient.InvoiceItems().List(&stripe.InvoiceItemListParams{
+			Customer: &cusID,
+			Pending:  stripe.Bool(true),
+			ListParams: stripe.ListParams{
+				Context: ctx,
+				Limit:   stripe.Int64(1),
+			},
+		})
+
+		hasItems := itemsIter.Next()
+		if err = itemsIter.Err(); err != nil {
+			return nil, err
+		}
+		if !hasItems {
+			return nil, nil
+		}
 	}
 
 	description := fmt.Sprintf("Storj Cloud Storage for %s %d", period.Month(), period.Year())
@@ -1108,9 +1218,9 @@ func (service *Service) createInvoice(ctx context.Context, cusID string, period 
 			AutoAdvance:                 stripe.Bool(service.AutoAdvance),
 			Description:                 stripe.String(description),
 			PendingInvoiceItemsBehavior: stripe.String("include"),
+			Footer:                      footer,
 		},
 	)
-
 	if err != nil {
 		return nil, err
 	}
@@ -1131,7 +1241,7 @@ func (service *Service) createInvoice(ctx context.Context, cusID string, period 
 }
 
 // createInvoices creates invoices for Stripe customers.
-func (service *Service) createInvoices(ctx context.Context, customers []Customer, period time.Time) (scheduled, draft int, err error) {
+func (service *Service) createInvoices(ctx context.Context, customers []Customer, period time.Time, includeEmissionInfo bool) (scheduled, draft int, err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	limiter := sync2.NewLimiter(service.maxParallelCalls)
@@ -1141,16 +1251,16 @@ func (service *Service) createInvoices(ctx context.Context, customers []Customer
 	for _, cus := range customers {
 		cus := cus
 		limiter.Go(ctx, func() {
-			if inactive, err := service.isUserInactive(ctx, cus.UserID); err != nil {
+			if skip, err := service.mustSkipUser(ctx, cus.UserID); err != nil {
 				mu.Lock()
 				errGrp.Add(err)
 				mu.Unlock()
 				return
-			} else if inactive {
+			} else if skip {
 				return
 			}
 
-			inv, err := service.createInvoice(ctx, cus.ID, period)
+			inv, err := service.createInvoice(ctx, cus.ID, period, includeEmissionInfo)
 			if err != nil {
 				mu.Lock()
 				errGrp.Add(err)
@@ -1277,9 +1387,9 @@ func (service *Service) CreateBalanceInvoiceItems(ctx context.Context) (err erro
 		if err != nil {
 			return err
 		}
-		if inactive, err := service.isUserInactive(ctx, userID); err != nil {
+		if skip, err := service.mustSkipUser(ctx, userID); err != nil {
 			return err
-		} else if inactive {
+		} else if skip {
 			continue
 		}
 
@@ -1301,14 +1411,16 @@ func (service *Service) CreateBalanceInvoiceItems(ctx context.Context) (err erro
 			continue
 		}
 		service.log.Info("Updating customer balance to 0", zap.String("CustomerID", itr.Customer().ID))
-		custParams := &stripe.CustomerParams{
+		balanceParams := &stripe.CustomerBalanceTransactionParams{
 			Params: stripe.Params{
 				Context: ctx,
 			},
-			Balance:     stripe.Int64(0),
+			Amount:      stripe.Int64(-itr.Customer().Balance),
+			Currency:    stripe.String(string(stripe.CurrencyUSD)),
+			Customer:    stripe.String(itr.Customer().ID),
 			Description: stripe.String("Customer balance adjusted to 0 after adding invoice item " + invoiceItem.ID),
 		}
-		_, err = service.stripeClient.Customers().Update(itr.Customer().ID, custParams)
+		_, err = service.stripeClient.CustomerBalanceTransactions().New(balanceParams)
 		if err != nil {
 			service.log.Error("Failed to update customer balance to 0 after adding invoice item", zap.Error(err))
 			errGrp.Add(err)
@@ -1326,7 +1438,7 @@ func (service *Service) CreateBalanceInvoiceItems(ctx context.Context) (err erro
 // GenerateInvoices performs tasks necessary to generate Stripe invoices.
 // This is equivalent to invoking PrepareInvoiceProjectRecords, InvoiceApplyProjectRecords,
 // and CreateInvoices in order.
-func (service *Service) GenerateInvoices(ctx context.Context, period time.Time, shouldAggregate bool) (err error) {
+func (service *Service) GenerateInvoices(ctx context.Context, period time.Time, shouldAggregate bool, includeEmissionInfo bool) (err error) {
 	defer mon.Task()(&ctx)(&err)
 
 	service.log.Info("Preparing invoice project records")
@@ -1350,7 +1462,7 @@ func (service *Service) GenerateInvoices(ctx context.Context, period time.Time, 
 	}
 
 	service.log.Info("Creating invoices")
-	err = service.CreateInvoices(ctx, period)
+	err = service.CreateInvoices(ctx, period, includeEmissionInfo)
 	if err != nil {
 		return err
 	}
@@ -1373,11 +1485,15 @@ func (service *Service) FinalizeInvoices(ctx context.Context) (err error) {
 
 		userID, err := service.db.Customers().GetUserID(ctx, stripeInvoice.Customer.ID)
 		if err != nil {
+			if errors.Is(err, ErrNoCustomer) {
+				service.log.Warn("User ID does not exist for invoiced customer.", zap.String("stripe customer", stripeInvoice.Customer.ID))
+				continue
+			}
 			return Error.Wrap(err)
 		}
-		if inactive, err := service.isUserInactive(ctx, userID); err != nil {
+		if skip, err := service.mustSkipUser(ctx, userID); err != nil {
 			return Error.Wrap(err)
-		} else if inactive {
+		} else if skip {
 			continue
 		}
 
@@ -1448,9 +1564,9 @@ func (service *Service) PayCustomerInvoices(ctx context.Context, customerID stri
 	if err != nil {
 		return Error.Wrap(err)
 	}
-	if inactive, err := service.isUserInactive(ctx, userID); err != nil {
+	if skip, err := service.mustSkipUser(ctx, userID); err != nil {
 		return Error.Wrap(err)
-	} else if inactive {
+	} else if skip {
 		return Error.New("customer %s is inactive", customerID)
 	}
 
@@ -1608,14 +1724,18 @@ func (service *Service) payInvoicesWithTokenBalance(ctx context.Context, cusID s
 	return errGrp.Err()
 }
 
-// isUserInactive checks whether a user does not have a status of console.Active.
-func (service *Service) isUserInactive(ctx context.Context, userID uuid.UUID) (bool, error) {
+// mustSkipUser checks whether a user does not have a status of console.Active or is in Free tier.
+func (service *Service) mustSkipUser(ctx context.Context, userID uuid.UUID) (bool, error) {
 	user, err := service.usersDB.Get(ctx, userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return true, nil
 		}
 		return false, Error.New("unable to look up user %s: %w", userID, err)
+	}
+
+	if service.enableFreeTrialLogic {
+		return user.Status != console.Active || !user.PaidTier, nil
 	}
 	return user.Status != console.Active, nil
 }
@@ -1650,6 +1770,27 @@ func (service *Service) calculateProjectUsagePrice(usage accounting.ProjectUsage
 // they want. This avoids races and sleeping, making tests more reliable and efficient.
 func (service *Service) SetNow(now func() time.Time) {
 	service.nowFn = now
+}
+
+// getFromDate returns from date value used for data usage calculations depending on users upgrade time.
+func (service *Service) getFromDate(ctx context.Context, userID uuid.UUID, start, end time.Time) (time.Time, error) {
+	upgradeTime, err := service.usersDB.GetUpgradeTime(ctx, userID)
+	if err != nil {
+		return start, err
+	}
+
+	if upgradeTime == nil {
+		return start, nil
+	}
+
+	utc := upgradeTime.UTC()
+	dayAfterUpgrade := time.Date(utc.Year(), utc.Month(), utc.Day()+1, 0, 0, 0, 0, time.UTC)
+
+	if dayAfterUpgrade.After(start) && dayAfterUpgrade.Before(end) {
+		return dayAfterUpgrade, nil
+	}
+
+	return start, nil
 }
 
 // storageMBMonthDecimal converts storage usage from Byte-Hours to Megabyte-Months.

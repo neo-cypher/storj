@@ -11,10 +11,10 @@ import (
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 
-	"storj.io/private/dbutil"
-	"storj.io/private/dbutil/cockroachutil"
-	"storj.io/private/dbutil/pgutil"
-	"storj.io/private/tagsql"
+	"storj.io/common/dbutil"
+	"storj.io/common/dbutil/cockroachutil"
+	"storj.io/common/dbutil/pgutil"
+	"storj.io/common/tagsql"
 	"storj.io/storj/private/migrate"
 )
 
@@ -2594,6 +2594,66 @@ func (db *satelliteDB) ProductionMigration() *migrate.Migration {
 				Action: migrate.SQL{
 					`ALTER TABLE projects ALTER COLUMN default_versioning SET DEFAULT 1;`,
 					`UPDATE projects SET default_versioning = 1 WHERE default_versioning = 0;`,
+				},
+			},
+			{
+				DB:          &db.migrationDB,
+				Description: "add last_ip_port to node_events",
+				Version:     255,
+				Action: migrate.SQL{
+					`ALTER TABLE node_events ADD COLUMN last_ip_port TEXT;`,
+				},
+			},
+			{
+				DB:          &db.migrationDB,
+				Description: "add notice_dismissal column to user_settings to track dismissed notices",
+				Version:     256,
+				Action: migrate.SQL{
+					`ALTER TABLE user_settings ADD COLUMN notice_dismissal jsonb NOT NULL DEFAULT '{}';`,
+				},
+			},
+			{
+				DB:          &db.migrationDB,
+				Description: "add columns to handle user free trial",
+				Version:     257,
+				Action: migrate.SQL{
+					`ALTER TABLE users ADD COLUMN trial_notifications INTEGER NOT NULL DEFAULT 0;`,
+					`ALTER TABLE users ADD COLUMN trial_expiration timestamp with time zone;`,
+					`ALTER TABLE users ADD COLUMN upgrade_time timestamp with time zone;`,
+				},
+			},
+			{
+				DB:          &db.migrationDB,
+				Description: "add chain_id to storjscan payments table",
+				Version:     258,
+				Action: migrate.SQL{
+					`ALTER TABLE storjscan_payments ADD COLUMN chain_id bigint NOT NULL DEFAULT 0;`,
+				},
+			},
+			{
+				DB:          &db.migrationDB,
+				Description: "backfill storjscan chain_id column",
+				Version:     259,
+				Action: migrate.SQL{
+					`UPDATE storjscan_payments SET chain_id = 1 WHERE chain_id = 0;`,
+				},
+			},
+			{
+				DB:          &db.migrationDB,
+				Description: "update storjscan payments table index to include chain_id",
+				Version:     260,
+				Action: migrate.SQL{
+					`DROP INDEX storjscan_payments_block_number_log_index_index;`,
+					`CREATE INDEX storjscan_payments_chain_id_block_number_log_index_index ON storjscan_payments ( chain_id, block_number, log_index );`,
+				},
+			},
+			{
+				DB:          &db.migrationDB,
+				Description: "update storjscan payments table to use chain_id in primary key",
+				Version:     261,
+				Action: migrate.SQL{
+					`ALTER TABLE storjscan_payments DROP CONSTRAINT storjscan_payments_pkey;`,
+					`ALTER TABLE storjscan_payments ADD CONSTRAINT storjscan_payments_pkey PRIMARY KEY ( chain_id, block_hash, log_index );`,
 				},
 			},
 			// NB: after updating testdata in `testdata`, run

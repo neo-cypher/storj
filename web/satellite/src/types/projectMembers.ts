@@ -8,8 +8,6 @@ import { SortDirection } from '@/types/common';
 import { User } from '@/types/users';
 import { DEFAULT_PAGE_LIMIT } from '@/types/pagination';
 
-export type OnHeaderClickCallback = (sortBy: ProjectMemberOrderBy, sortDirection: SortDirection) => Promise<void>;
-
 export enum ProjectMemberOrderBy {
     NAME = 1,
     EMAIL,
@@ -81,7 +79,7 @@ export class ProjectMemberCursor {
         public limit: number = DEFAULT_PAGE_LIMIT,
         public page: number = 1,
         public order: ProjectMemberOrderBy = ProjectMemberOrderBy.NAME,
-        public orderDirection: SortDirection = SortDirection.ASCENDING,
+        public orderDirection: SortDirection = SortDirection.asc,
     ) {}
 }
 
@@ -94,7 +92,7 @@ export class ProjectMembersPage {
         public projectInvitations: ProjectInvitationItemModel[] = [],
         public search: string = '',
         public order: ProjectMemberOrderBy = ProjectMemberOrderBy.NAME,
-        public orderDirection: SortDirection = SortDirection.ASCENDING,
+        public orderDirection: SortDirection = SortDirection.asc,
         public limit: number = 6,
         public pageCount: number = 0,
         public currentPage: number = 1,
@@ -115,7 +113,7 @@ export class ProjectMembersPage {
                 cmp = (a, b) => a.getName().toLowerCase().localeCompare(b.getName().toLowerCase());
             }
 
-            const result = (this.orderDirection === SortDirection.DESCENDING) ? cmp(b, a) : cmp(a, b);
+            const result = (this.orderDirection === SortDirection.desc) ? cmp(b, a) : cmp(a, b);
             return (result !== 0) ? result : a.getEmail().toLowerCase().localeCompare(b.getEmail().toLowerCase());
         });
     }

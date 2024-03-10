@@ -4,10 +4,13 @@
 package console_test
 
 import (
+	"database/sql"
+	"fmt"
 	"math/rand"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 
 	"storj.io/common/memory"
@@ -29,10 +32,11 @@ func getUserLimits(u *console.User) console.UsageLimits {
 
 func getProjectLimits(p *console.Project) console.UsageLimits {
 	return console.UsageLimits{
-		Storage:   p.StorageLimit.Int64(),
-		Bandwidth: p.BandwidthLimit.Int64(),
-		Segment:   *p.SegmentLimit,
-		RateLimit: p.RateLimit,
+		Storage:    p.StorageLimit.Int64(),
+		Bandwidth:  p.BandwidthLimit.Int64(),
+		Segment:    *p.SegmentLimit,
+		RateLimit:  p.RateLimit,
+		BurstLimit: p.BurstLimit,
 	}
 }
 
@@ -265,10 +269,12 @@ func TestAccountLegalFreeze(t *testing.T) {
 		projLimits := randUsageLimits()
 		rateLimit := 20000
 		projLimits.RateLimit = &rateLimit
+		projLimits.BurstLimit = &rateLimit
 		proj, err := sat.AddProject(ctx, user.ID, "")
 		require.NoError(t, err)
 		require.NoError(t, projectsDB.UpdateUsageLimits(ctx, proj.ID, projLimits))
 		require.NoError(t, projectsDB.UpdateRateLimit(ctx, proj.ID, projLimits.RateLimit))
+		require.NoError(t, projectsDB.UpdateBurstLimit(ctx, proj.ID, projLimits.BurstLimit))
 
 		checkLimits := func(t *testing.T) {
 			user, err = usersDB.Get(ctx, user.ID)
@@ -283,6 +289,7 @@ func TestAccountLegalFreeze(t *testing.T) {
 			require.Zero(t, usageLimits.Bandwidth)
 			zeroLimit := 0
 			require.Equal(t, &zeroLimit, usageLimits.RateLimit)
+			require.Equal(t, &zeroLimit, usageLimits.BurstLimit)
 		}
 
 		frozen, err := service.IsUserFrozen(ctx, user.ID, console.LegalFreeze)
@@ -317,14 +324,19 @@ func TestAccountLegalFreeze(t *testing.T) {
 		require.NoError(t, service.LegalUnfreezeUser(ctx, user.ID))
 
 		require.NoError(t, service.BillingFreezeUser(ctx, user.ID))
-		frozen, err = service.IsUserFrozen(ctx, user.ID, console.LegalFreeze)
+		frozen, err = service.IsUserBillingFrozen(ctx, user.ID)
 		require.NoError(t, err)
-		require.False(t, frozen)
+		require.True(t, frozen)
 		// legal freezing a billing frozen user should be possible.
 		require.NoError(t, service.LegalFreezeUser(ctx, user.ID))
 		frozen, err = service.IsUserFrozen(ctx, user.ID, console.LegalFreeze)
 		require.NoError(t, err)
 		require.True(t, frozen)
+		require.NoError(t, service.LegalUnfreezeUser(ctx, user.ID))
+
+		require.NoError(t, service.TrialExpirationFreezeUser(ctx, user.ID))
+		// legal freezing a trial-expiration frozen user should be possible.
+		require.NoError(t, service.LegalFreezeUser(ctx, user.ID))
 
 		freezes, err := service.GetAll(ctx, user.ID)
 		require.NoError(t, err)
@@ -511,7 +523,6 @@ func TestFreezeEffects(t *testing.T) {
 			Satellite: func(log *zap.Logger, index int, config *satellite.Config) {
 				config.AccountFreeze.Enabled = true
 				// disable limit caching
-				config.ProjectLimit.CacheCapacity = 0
 				config.Metainfo.RateLimiter.CacheCapacity = 0
 			},
 		},
@@ -624,5 +635,226 @@ func TestFreezeEffects(t *testing.T) {
 			shouldListAndDelete(t)
 			shouldUploadAndDownload(t)
 		})
+	})
+}
+
+func TestAccountBotFreezeUnfreeze(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1,
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		usersDB := sat.DB.Console().Users()
+		projectsDB := sat.DB.Console().Projects()
+		accFreezeDB := sat.DB.Console().AccountFreezeEvents()
+		service := console.NewAccountFreezeService(sat.DB.Console(), sat.API.Analytics.Service, sat.Config.Console.AccountFreeze)
+
+		user, err := sat.AddUser(ctx, console.CreateUser{
+			FullName: "Test Bot User",
+			Email:    "botuser@mail.test",
+		}, 2)
+		require.NoError(t, err)
+
+		_, err = sat.AddProject(ctx, user.ID, "test")
+		require.NoError(t, err)
+
+		_, err = sat.AddProject(ctx, user.ID, "test1")
+		require.NoError(t, err)
+
+		_, err = accFreezeDB.Upsert(ctx, &console.AccountFreezeEvent{
+			UserID: user.ID,
+			Type:   console.DelayedBotFreeze,
+		})
+		require.NoError(t, err)
+
+		user, err = usersDB.Get(ctx, user.ID)
+		require.NoError(t, err)
+		require.Equal(t, console.Active, user.Status)
+		require.NotZero(t, user.ProjectBandwidthLimit)
+		require.NotZero(t, user.ProjectStorageLimit)
+		require.NotZero(t, user.ProjectSegmentLimit)
+
+		require.NoError(t, service.BotFreezeUser(ctx, user.ID))
+
+		user, err = usersDB.Get(ctx, user.ID)
+		require.NoError(t, err)
+		require.Equal(t, console.PendingBotVerification, user.Status)
+		require.Zero(t, user.ProjectBandwidthLimit)
+		require.Zero(t, user.ProjectStorageLimit)
+		require.Zero(t, user.ProjectSegmentLimit)
+
+		projects, err := projectsDB.GetOwn(ctx, user.ID)
+		require.NoError(t, err)
+		require.Len(t, projects, 2)
+
+		for _, p := range projects {
+			require.Zero(t, *p.BandwidthLimit)
+			require.Zero(t, *p.StorageLimit)
+			require.Zero(t, *p.SegmentLimit)
+			require.Zero(t, *p.RateLimit)
+			require.Zero(t, *p.BurstLimit)
+		}
+
+		event, err := accFreezeDB.Get(ctx, user.ID, console.DelayedBotFreeze)
+		require.Error(t, err)
+		require.True(t, errs.Is(err, sql.ErrNoRows))
+		require.Nil(t, event)
+
+		event, err = accFreezeDB.Get(ctx, user.ID, console.BotFreeze)
+		require.NoError(t, err)
+		require.NotNil(t, event)
+
+		require.NoError(t, service.BotUnfreezeUser(ctx, user.ID))
+
+		user, err = usersDB.Get(ctx, user.ID)
+		require.NoError(t, err)
+		require.Equal(t, console.Active, user.Status)
+		require.NotZero(t, user.ProjectBandwidthLimit)
+		require.NotZero(t, user.ProjectStorageLimit)
+		require.NotZero(t, user.ProjectSegmentLimit)
+
+		projects, err = sat.DB.Console().Projects().GetOwn(ctx, user.ID)
+		require.NoError(t, err)
+		require.Len(t, projects, 2)
+
+		for _, p := range projects {
+			require.NotZero(t, *p.BandwidthLimit)
+			require.NotZero(t, *p.StorageLimit)
+			require.NotZero(t, *p.SegmentLimit)
+		}
+
+		event, err = accFreezeDB.Get(ctx, user.ID, console.BotFreeze)
+		require.Error(t, err)
+		require.True(t, errs.Is(err, sql.ErrNoRows))
+		require.Nil(t, event)
+
+		require.NoError(t, service.TrialExpirationFreezeUser(ctx, user.ID))
+		// bot freezing a trial-expiration frozen user should be possible.
+		require.NoError(t, service.BotFreezeUser(ctx, user.ID))
+	})
+}
+
+func TestTrailExpirationFreeze(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1,
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		usersDB := sat.DB.Console().Users()
+		projectsDB := sat.DB.Console().Projects()
+		service := console.NewAccountFreezeService(sat.DB.Console(), sat.API.Analytics.Service, sat.Config.Console.AccountFreeze)
+
+		userLimits := randUsageLimits()
+		user, err := sat.AddUser(ctx, console.CreateUser{
+			FullName: "Test User",
+			Email:    "user@mail.test",
+		}, 2)
+		require.NoError(t, err)
+		require.NoError(t, usersDB.UpdateUserProjectLimits(ctx, user.ID, userLimits))
+
+		projLimits := randUsageLimits()
+		proj, err := sat.AddProject(ctx, user.ID, "")
+		require.NoError(t, err)
+		require.NoError(t, projectsDB.UpdateUsageLimits(ctx, proj.ID, projLimits))
+
+		frozen, err := service.IsUserFrozen(ctx, user.ID, console.TrialExpirationFreeze)
+		require.NoError(t, err)
+		require.False(t, frozen)
+
+		require.NoError(t, service.ViolationFreezeUser(ctx, user.ID))
+		// cannot trial-expiration freeze a violation frozen user.
+		require.Error(t, service.TrialExpirationFreezeUser(ctx, user.ID))
+		require.NoError(t, service.ViolationUnfreezeUser(ctx, user.ID))
+
+		require.NoError(t, service.LegalFreezeUser(ctx, user.ID))
+		// cannot trial-expiration freeze a legal-frozen user.
+		require.Error(t, service.TrialExpirationFreezeUser(ctx, user.ID))
+		require.NoError(t, service.LegalUnfreezeUser(ctx, user.ID))
+
+		require.NoError(t, service.BotFreezeUser(ctx, user.ID))
+		// cannot trial-expiration freeze a bot-frozen user.
+		require.Error(t, service.TrialExpirationFreezeUser(ctx, user.ID))
+		require.NoError(t, service.BotUnfreezeUser(ctx, user.ID))
+
+		require.NoError(t, service.TrialExpirationFreezeUser(ctx, user.ID))
+
+		user, err = usersDB.Get(ctx, user.ID)
+		require.NoError(t, err)
+		require.Zero(t, getUserLimits(user))
+
+		proj, err = projectsDB.Get(ctx, proj.ID)
+		require.NoError(t, err)
+		usageLimits := getProjectLimits(proj)
+		require.Zero(t, usageLimits.Segment)
+		require.Zero(t, usageLimits.Storage)
+		require.Zero(t, usageLimits.Bandwidth)
+		zeroLimit := 0
+		require.Equal(t, &zeroLimit, usageLimits.RateLimit)
+		require.Equal(t, &zeroLimit, usageLimits.BurstLimit)
+
+		frozen, err = service.IsUserFrozen(ctx, user.ID, console.TrialExpirationFreeze)
+		require.NoError(t, err)
+		require.True(t, frozen)
+
+		freezes, err := service.GetAll(ctx, user.ID)
+		require.NoError(t, err)
+		require.NotNil(t, freezes.TrialExpirationFreeze)
+
+		require.NoError(t, service.TrialExpirationUnfreezeUser(ctx, user.ID))
+
+		user, err = usersDB.Get(ctx, user.ID)
+		require.NoError(t, err)
+		require.Equal(t, userLimits, getUserLimits(user))
+
+		proj, err = projectsDB.Get(ctx, proj.ID)
+		require.NoError(t, err)
+		require.Equal(t, projLimits, getProjectLimits(proj))
+	})
+}
+
+func TestGetAllEvents(t *testing.T) {
+	testplanet.Run(t, testplanet.Config{
+		SatelliteCount: 1,
+	}, func(t *testing.T, ctx *testcontext.Context, planet *testplanet.Planet) {
+		sat := planet.Satellites[0]
+		freezeDB := sat.DB.Console().AccountFreezeEvents()
+
+		freezeTypes := []console.AccountFreezeEventType{
+			console.BillingFreeze,
+			console.BillingWarning,
+			console.ViolationFreeze,
+			console.LegalFreeze,
+			console.TrialExpirationFreeze,
+			console.BotFreeze,
+			console.DelayedBotFreeze,
+		}
+		for _, freezeType := range freezeTypes {
+			user, err := sat.AddUser(ctx, console.CreateUser{
+				FullName: "Test User",
+				Email:    fmt.Sprintf("%duser@mail.test", freezeType),
+			}, 2)
+			require.NoError(t, err)
+			_, err = freezeDB.Upsert(ctx, &console.AccountFreezeEvent{
+				UserID: user.ID,
+				Type:   freezeType,
+			})
+			require.NoError(t, err)
+		}
+
+		cursor := console.FreezeEventsCursor{Limit: 10}
+		eventPage, err := freezeDB.GetAllEvents(ctx, cursor, nil)
+		require.NoError(t, err)
+		require.Len(t, eventPage.Events, len(freezeTypes))
+
+		eventPage, err = freezeDB.GetAllEvents(ctx, cursor, freezeTypes)
+		require.NoError(t, err)
+		require.Len(t, eventPage.Events, len(freezeTypes))
+
+		eventPage, err = freezeDB.GetAllEvents(ctx, cursor, []console.AccountFreezeEventType{console.BillingFreeze})
+		require.NoError(t, err)
+		require.Len(t, eventPage.Events, 1)
+		require.Equal(t, console.BillingFreeze, eventPage.Events[0].Type)
+
+		eventPage, err = freezeDB.GetAllEvents(ctx, cursor, []console.AccountFreezeEventType{console.BillingFreeze, console.LegalFreeze})
+		require.NoError(t, err)
+		require.Len(t, eventPage.Events, 2)
 	})
 }

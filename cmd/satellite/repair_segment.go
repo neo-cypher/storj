@@ -23,12 +23,12 @@ import (
 	"storj.io/common/errs2"
 	"storj.io/common/pb"
 	"storj.io/common/peertls/tlsopts"
+	"storj.io/common/process"
 	"storj.io/common/rpc"
 	"storj.io/common/rpc/rpcstatus"
 	"storj.io/common/signing"
 	"storj.io/common/storj"
 	"storj.io/common/uuid"
-	"storj.io/private/process"
 	"storj.io/storj/private/revocation"
 	"storj.io/storj/satellite"
 	"storj.io/storj/satellite/metabase"
@@ -93,12 +93,12 @@ func cmdRepairSegment(cmd *cobra.Command, args []string) (err error) {
 
 	dialer := rpc.NewDefaultDialer(tlsOptions)
 
-	placement, err := config.Placement.Parse()
+	placement, err := config.Placement.Parse(config.Overlay.Node.CreateDefaultPlacement)
 	if err != nil {
 		return err
 	}
 
-	overlayService, err := overlay.NewService(log.Named("overlay"), db.OverlayCache(), db.NodeEvents(), placement.CreateFilters, config.Console.ExternalAddress, config.Console.SatelliteName, config.Overlay)
+	overlayService, err := overlay.NewService(log.Named("overlay"), db.OverlayCache(), db.NodeEvents(), placement, config.Console.ExternalAddress, config.Console.SatelliteName, config.Overlay)
 	if err != nil {
 		return err
 	}
@@ -121,7 +121,7 @@ func cmdRepairSegment(cmd *cobra.Command, args []string) (err error) {
 		signing.SigneeFromPeerIdentity(identity.PeerIdentity()),
 		config.Repairer.DialTimeout,
 		config.Repairer.DownloadTimeout,
-		true) // force inmemory download of pieces
+		true, true) // force inmemory download and upload of pieces
 
 	segmentRepairer := repairer.NewSegmentRepairer(
 		log.Named("segment-repair"),
@@ -130,7 +130,7 @@ func cmdRepairSegment(cmd *cobra.Command, args []string) (err error) {
 		overlayService,
 		nil, // TODO add noop version
 		ecRepairer,
-		placement.CreateFilters,
+		placement,
 		config.Checker.RepairOverrides,
 		config.Repairer,
 	)

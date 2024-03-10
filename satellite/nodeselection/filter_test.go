@@ -190,6 +190,37 @@ func TestCountryFilter_FromString(t *testing.T) {
 	}
 }
 
+func TestNodeListFilter(t *testing.T) {
+	filter, err := AllowedNodesFromFile("filter_testdata.txt")
+	require.NoError(t, err)
+	selectedNode := func(pregeneratedIdentity int) *SelectedNode {
+		return &SelectedNode{
+			ID: testidentity.MustPregeneratedIdentity(pregeneratedIdentity, storj.LatestIDVersion()).ID,
+		}
+	}
+	require.True(t, filter.Match(selectedNode(1)))
+	require.True(t, filter.Match(selectedNode(2)))
+	require.False(t, filter.Match(selectedNode(3)))
+}
+
+func TestAttributeFilter(t *testing.T) {
+	filter, err := NewAttributeFilter("email", "email@test")
+	require.NoError(t, err)
+	require.True(t, filter.Match(&SelectedNode{
+		Email: "email@test",
+	}))
+	require.False(t, filter.Match(&SelectedNode{
+		Email: "notemail@test",
+	}))
+
+	filter, err = NewAttributeFilter("email", stringNotMatch(""))
+	require.NoError(t, err)
+	require.False(t, filter.Match(&SelectedNode{
+		Email: "",
+	}))
+
+}
+
 // BenchmarkNodeFilterFullTable checks performances of rule evaluation on ALL storage nodes.
 func BenchmarkNodeFilterFullTable(b *testing.B) {
 	filters := NodeFilters{}

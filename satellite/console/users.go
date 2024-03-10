@@ -22,6 +22,8 @@ import (
 type Users interface {
 	// Get is a method for querying user from the database by id.
 	Get(ctx context.Context, id uuid.UUID) (*User, error)
+	// GetExpiredFreeTrialsAfter is a method for querying users in free trial from the database with trial expiry (after).
+	GetExpiredFreeTrialsAfter(ctx context.Context, after time.Time, cursor UserCursor) (*UsersPage, error)
 	// GetUnverifiedNeedingReminder gets unverified users needing a reminder to verify their email.
 	GetUnverifiedNeedingReminder(ctx context.Context, firstReminder, secondReminder, cutoff time.Time) ([]*User, error)
 	// UpdateVerificationReminders increments verification_reminders.
@@ -43,7 +45,7 @@ type Users interface {
 	// Update is a method for updating user entity.
 	Update(ctx context.Context, userID uuid.UUID, request UpdateUserRequest) error
 	// UpdatePaidTier sets whether the user is in the paid tier.
-	UpdatePaidTier(ctx context.Context, id uuid.UUID, paidTier bool, projectBandwidthLimit, projectStorageLimit memory.Size, projectSegmentLimit int64, projectLimit int) error
+	UpdatePaidTier(ctx context.Context, id uuid.UUID, paidTier bool, projectBandwidthLimit, projectStorageLimit memory.Size, projectSegmentLimit int64, projectLimit int, upgradeTime *time.Time) error
 	// UpdateUserAgent is a method to update the user's user agent.
 	UpdateUserAgent(ctx context.Context, id uuid.UUID, userAgent []byte) error
 	// UpdateUserProjectLimits is a method to update the user's usage limits for new projects.
@@ -58,6 +60,8 @@ type Users interface {
 	GetUserPaidTier(ctx context.Context, id uuid.UUID) (isPaid bool, err error)
 	// GetSettings is a method for returning a user's set of configurations.
 	GetSettings(ctx context.Context, userID uuid.UUID) (*UserSettings, error)
+	// GetUpgradeTime is a method for returning a user's upgrade time.
+	GetUpgradeTime(ctx context.Context, userID uuid.UUID) (*time.Time, error)
 	// UpsertSettings is a method for updating a user's set of configurations if it exists and inserting it otherwise.
 	UpsertSettings(ctx context.Context, userID uuid.UUID, settings UpsertUserSettingsRequest) error
 }
@@ -149,13 +153,14 @@ type ProjectLimits struct {
 
 // AuthUser holds info for user authentication token requests.
 type AuthUser struct {
-	Email           string `json:"email"`
-	Password        string `json:"password"`
-	MFAPasscode     string `json:"mfaPasscode"`
-	MFARecoveryCode string `json:"mfaRecoveryCode"`
-	CaptchaResponse string `json:"captchaResponse"`
-	IP              string `json:"-"`
-	UserAgent       string `json:"-"`
+	Email              string `json:"email"`
+	Password           string `json:"password"`
+	MFAPasscode        string `json:"mfaPasscode"`
+	MFARecoveryCode    string `json:"mfaRecoveryCode"`
+	CaptchaResponse    string `json:"captchaResponse"`
+	RememberForOneWeek bool   `json:"rememberForOneWeek"`
+	IP                 string `json:"-"`
+	UserAgent          string `json:"-"`
 }
 
 // TokenInfo holds info for user authentication token responses.
@@ -210,7 +215,7 @@ type User struct {
 	ShortName string `json:"shortName"`
 
 	Email        string `json:"email"`
-	PasswordHash []byte `json:"passwordHash"`
+	PasswordHash []byte `json:"-"`
 
 	Status    UserStatus `json:"status"`
 	UserAgent []byte     `json:"userAgent"`
@@ -233,12 +238,13 @@ type User struct {
 	HaveSalesContact bool `json:"haveSalesContact"`
 
 	MFAEnabled       bool     `json:"mfaEnabled"`
-	MFASecretKey     string   `json:"mfaSecretKey"`
-	MFARecoveryCodes []string `json:"mfaRecoveryCodes"`
+	MFASecretKey     string   `json:"-"`
+	MFARecoveryCodes []string `json:"-"`
 
 	SignupPromoCode string `json:"signupPromoCode"`
 
 	VerificationReminders int `json:"verificationReminders"`
+	TrialNotifications    int `json:"trialNotifications"`
 
 	FailedLoginCount       int       `json:"failedLoginCount"`
 	LoginLockoutExpiration time.Time `json:"loginLockoutExpiration"`
@@ -248,6 +254,9 @@ type User struct {
 
 	ActivationCode string `json:"-"`
 	SignupId       string `json:"-"`
+
+	TrialExpiration *time.Time `json:"trialExpiration"`
+	UpgradeTime     *time.Time `json:"upgradeTime"`
 }
 
 // ResponseUser is an entity which describes db User and can be sent in response.
@@ -293,11 +302,12 @@ type UpdateUserRequest struct {
 	FullName  *string
 	ShortName **string
 
-	Position       *string
-	CompanyName    *string
-	WorkingOn      *string
-	IsProfessional *bool
-	EmployeeCount  *string
+	Position         *string
+	CompanyName      *string
+	WorkingOn        *string
+	IsProfessional   *bool
+	HaveSalesContact *bool
+	EmployeeCount    *string
 
 	Email        *string
 	PasswordHash []byte
@@ -324,15 +334,19 @@ type UpdateUserRequest struct {
 
 	ActivationCode *string
 	SignupId       *string
+
+	TrialExpiration **time.Time
+	UpgradeTime     *time.Time
 }
 
 // UserSettings contains configurations for a user.
 type UserSettings struct {
-	SessionDuration  *time.Duration `json:"sessionDuration"`
-	OnboardingStart  bool           `json:"onboardingStart"`
-	OnboardingEnd    bool           `json:"onboardingEnd"`
-	PassphrasePrompt bool           `json:"passphrasePrompt"`
-	OnboardingStep   *string        `json:"onboardingStep"`
+	SessionDuration  *time.Duration  `json:"sessionDuration"`
+	OnboardingStart  bool            `json:"onboardingStart"`
+	OnboardingEnd    bool            `json:"onboardingEnd"`
+	PassphrasePrompt bool            `json:"passphrasePrompt"`
+	OnboardingStep   *string         `json:"onboardingStep"`
+	NoticeDismissal  NoticeDismissal `json:"noticeDismissal"`
 }
 
 // UpsertUserSettingsRequest contains all user settings which are configurable via Users.UpsertSettings.
@@ -343,14 +357,26 @@ type UpsertUserSettingsRequest struct {
 	OnboardingEnd    *bool
 	PassphrasePrompt *bool
 	OnboardingStep   *string
+	NoticeDismissal  *NoticeDismissal
+}
+
+// NoticeDismissal contains whether notices should be shown to a user.
+type NoticeDismissal struct {
+	FileGuide                bool `json:"fileGuide"`
+	ServerSideEncryption     bool `json:"serverSideEncryption"`
+	PartnerUpgradeBanner     bool `json:"partnerUpgradeBanner"`
+	ProjectMembersPassphrase bool `json:"projectMembersPassphrase"`
 }
 
 // SetUpAccountRequest holds data for completing account setup.
 type SetUpAccountRequest struct {
-	FullName       string  `json:"fullName"`
-	IsProfessional bool    `json:"isProfessional"`
-	Position       *string `json:"position"`
-	CompanyName    *string `json:"companyName"`
-	EmployeeCount  *string `json:"employeeCount"`
-	StorageNeeds   *string `json:"storageNeeds"`
+	FullName         string  `json:"fullName"`
+	IsProfessional   bool    `json:"isProfessional"`
+	Position         *string `json:"position"`
+	CompanyName      *string `json:"companyName"`
+	EmployeeCount    *string `json:"employeeCount"`
+	StorageNeeds     *string `json:"storageNeeds"`
+	StorageUseCase   *string `json:"storageUseCase"`
+	FunctionalArea   *string `json:"functionalArea"`
+	HaveSalesContact bool    `json:"haveSalesContact"`
 }

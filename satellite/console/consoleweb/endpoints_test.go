@@ -91,6 +91,28 @@ func TestAuth(t *testing.T) {
 			require.NotEmpty(test.t, userIdentifier.ID)
 		}
 
+		{ // Update_AccountInfo
+			newName := "new name"
+			shortName := "NN"
+			resp, _ := test.request(http.MethodPatch, "/auth/account", test.toJSON(map[string]string{
+				"fullName":  newName,
+				"shortName": shortName,
+			}))
+			require.Equal(test.t, http.StatusOK, resp.StatusCode)
+
+			resp, body := test.request(http.MethodGet, "/auth/account", nil)
+			require.Equal(test.t, http.StatusOK, resp.StatusCode)
+			require.Contains(test.t, body, newName)
+			require.Contains(test.t, body, shortName)
+
+			// empty full name not allowed
+			resp, _ = test.request(http.MethodPatch, "/auth/account", test.toJSON(map[string]string{
+				"fullName":  "",
+				"shortName": shortName,
+			}))
+			require.Equal(test.t, http.StatusBadRequest, resp.StatusCode)
+		}
+
 		{ // Get_FreezeStatus
 			resp, body := test.request(http.MethodGet, "/auth/account/freezestatus", nil)
 			require.Equal(test.t, http.StatusOK, resp.StatusCode)
@@ -114,6 +136,7 @@ func TestAuth(t *testing.T) {
 				OnboardingEnd    bool
 				PassphrasePrompt bool
 				OnboardingStep   *string
+				NoticeDismissal  console.NoticeDismissal
 			}
 			testGetSettings := func(expected expectedSettings) {
 				resp, body := test.request(http.MethodGet, "/auth/account/settings", nil)
@@ -124,6 +147,7 @@ func TestAuth(t *testing.T) {
 					OnboardingEnd    bool
 					PassphrasePrompt bool
 					OnboardingStep   *string
+					NoticeDismissal  console.NoticeDismissal
 				}
 				require.Equal(t, http.StatusOK, resp.StatusCode)
 				require.NoError(test.t, json.Unmarshal([]byte(body), &settings))
@@ -132,6 +156,14 @@ func TestAuth(t *testing.T) {
 				require.Equal(test.t, expected.PassphrasePrompt, settings.PassphrasePrompt)
 				require.Equal(test.t, expected.OnboardingStep, settings.OnboardingStep)
 				require.Equal(test.t, expected.SessionDuration, settings.SessionDuration)
+				require.Equal(test.t, expected.NoticeDismissal, settings.NoticeDismissal)
+			}
+
+			noticeDismissal := console.NoticeDismissal{
+				FileGuide:                false,
+				ServerSideEncryption:     false,
+				PartnerUpgradeBanner:     false,
+				ProjectMembersPassphrase: false,
 			}
 
 			testGetSettings(expectedSettings{
@@ -140,10 +172,15 @@ func TestAuth(t *testing.T) {
 				OnboardingEnd:    true,
 				PassphrasePrompt: true,
 				OnboardingStep:   nil,
+				NoticeDismissal:  noticeDismissal,
 			})
 
 			step := "cli"
 			duration := time.Duration(15) * time.Minute
+			noticeDismissal.FileGuide = true
+			noticeDismissal.ServerSideEncryption = true
+			noticeDismissal.PartnerUpgradeBanner = true
+			noticeDismissal.ProjectMembersPassphrase = true
 			resp, _ := test.request(http.MethodPatch, "/auth/account/settings",
 				test.toJSON(map[string]interface{}{
 					"sessionDuration":  duration,
@@ -151,6 +188,12 @@ func TestAuth(t *testing.T) {
 					"onboardingEnd":    false,
 					"passphrasePrompt": false,
 					"onboardingStep":   step,
+					"noticeDismissal": map[string]bool{
+						"fileGuide":                noticeDismissal.FileGuide,
+						"serverSideEncryption":     noticeDismissal.ServerSideEncryption,
+						"partnerUpgradeBanner":     noticeDismissal.PartnerUpgradeBanner,
+						"projectMembersPassphrase": noticeDismissal.ProjectMembersPassphrase,
+					},
 				}))
 
 			require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -160,6 +203,7 @@ func TestAuth(t *testing.T) {
 				OnboardingEnd:    false,
 				PassphrasePrompt: false,
 				OnboardingStep:   &step,
+				NoticeDismissal:  noticeDismissal,
 			})
 
 			resp, _ = test.request(http.MethodPatch, "/auth/account/settings",
@@ -168,6 +212,7 @@ func TestAuth(t *testing.T) {
 					"onboardingStart": nil,
 					"onboardingEnd":   nil,
 					"onboardingStep":  nil,
+					"noticeDismissal": nil,
 				}))
 
 			require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -178,6 +223,7 @@ func TestAuth(t *testing.T) {
 				OnboardingEnd:    false,
 				PassphrasePrompt: false,
 				OnboardingStep:   &step,
+				NoticeDismissal:  noticeDismissal,
 			})
 
 			// having passed 0 as sessionDuration to /auth/account/settings should nullify it.
@@ -192,6 +238,7 @@ func TestAuth(t *testing.T) {
 				OnboardingStart: true,
 				OnboardingEnd:   false,
 				OnboardingStep:  &step,
+				NoticeDismissal: noticeDismissal,
 			})
 		}
 
@@ -378,66 +425,6 @@ func TestAPIKeys(t *testing.T) {
 		user := test.defaultUser()
 		test.login(user.email, user.password)
 
-		{ // Post_GenerateApiKey
-			resp, body := test.request(http.MethodPost, "/graphql",
-				test.toJSON(map[string]interface{}{
-					"variables": map[string]interface{}{
-						"projectId": test.defaultProjectID(),
-						"name":      user.email,
-					},
-					"query": `
-						mutation ($projectId: String!, $name: String!) {
-							createAPIKey(projectID: $projectId, name: $name) {
-								key
-								keyInfo {
-									id
-									name
-									createdAt
-									__typename
-								}
-								__typename
-							}
-						}`}))
-			require.Contains(t, body, "createAPIKey")
-			require.Equal(t, http.StatusOK, resp.StatusCode)
-		}
-
-		{ // Get_APIKeyInfoByProjectId
-			resp, body := test.request(http.MethodPost, "/graphql",
-				test.toJSON(map[string]interface{}{
-					"variables": map[string]interface{}{
-						"orderDirection": 1,
-						"projectId":      test.defaultProjectID(),
-						"limit":          6,
-						"search":         ``,
-						"page":           1,
-						"order":          1,
-					},
-					"query": `
-						query ($projectId: String!, $limit: Int!, $search: String!, $page: Int!, $order: Int!, $orderDirection: Int!) {
-							project(id: $projectId) {
-								apiKeys(cursor: {limit: $limit, search: $search, page: $page, order: $order, orderDirection: $orderDirection}) {
-									apiKeys {
-										id
-										name
-										createdAt
-										__typename
-									}
-									search
-									limit
-									order
-									pageCount
-									currentPage
-									totalCount
-									__typename
-								}
-								__typename
-							}
-						}`}))
-			require.Contains(t, body, "apiKeysPage")
-			require.Equal(t, http.StatusOK, resp.StatusCode)
-		}
-
 		{ // Get_ProjectAPIKeys
 			var projects console.APIKeyPage
 			path := "/api-keys/list-paged?projectID=" + test.defaultProjectID() + "&search=''&limit=6&page=1&order=1&orderDirection=1"
@@ -491,24 +478,6 @@ func TestProjects(t *testing.T) {
 		user := test.defaultUser()
 		test.login(user.email, user.password)
 
-		{ // Get_ProjectId
-			resp, body := test.request(http.MethodPost, "/graphql",
-				test.toJSON(map[string]interface{}{
-					"query": `
-						{
-							myProjects {
-								name
-								id
-								description
-								createdAt
-								ownerId
-								__typename
-							}
-						}`}))
-			require.Contains(t, body, test.defaultProjectID())
-			require.Equal(t, http.StatusOK, resp.StatusCode)
-		}
-
 		{ // Get_Salt
 			projectID := test.defaultProjectID()
 			id, err := uuid.FromString(projectID)
@@ -547,45 +516,6 @@ func TestProjects(t *testing.T) {
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 			require.NoError(t, json.Unmarshal([]byte(body), &projects))
 			require.NotEmpty(t, projects)
-		}
-
-		{ // Get_ProjectInfo
-			resp, body := test.request(http.MethodPost, "/graphql",
-				test.toJSON(map[string]interface{}{
-					"variables": map[string]interface{}{
-						"projectId": test.defaultProjectID(),
-						"before":    "2021-05-12T18:32:30.533Z",
-						"limit":     7,
-						"search":    "",
-						"page":      1,
-					},
-					"query": `
-						query ($projectId: String!, $before: DateTime!, $limit: Int!, $search: String!, $page: Int!) {
-							project(id: $projectId) {
-								bucketUsages(before: $before, cursor: {limit: $limit, search: $search, page: $page}) {
-									bucketUsages {
-										bucketName
-										storage
-										egress
-										objectCount
-										segmentCount
-										since
-										before
-										__typename
-									}
-									search
-									limit
-									offset
-									pageCount
-									currentPage
-									totalCount
-									__typename
-								}
-							__typename
-							}
-						}`}))
-			require.Contains(t, body, "bucketUsagePage")
-			require.Equal(t, http.StatusOK, resp.StatusCode)
 		}
 
 		{ // Get_ProjectUsageLimitById
@@ -670,7 +600,7 @@ func TestWrongUser(t *testing.T) {
 				},
 			},
 			{
-				endpoint: getProjectResourceUrl("members") + "?emails=" + "some@email.com",
+				endpoint: getProjectResourceUrl("members") + "?emails=" + "some@email.test",
 				method:   http.MethodDelete,
 			},
 			{
@@ -691,7 +621,7 @@ func TestWrongUser(t *testing.T) {
 				},
 			},
 			{
-				endpoint: getProjectResourceUrl("invite") + "/" + "some@email.com",
+				endpoint: getProjectResourceUrl("invite") + "/" + "some@email.test",
 				method:   http.MethodPost,
 			},
 			{

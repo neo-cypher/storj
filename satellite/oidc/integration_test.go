@@ -114,7 +114,7 @@ func TestOIDC(t *testing.T) {
 		user, err := sat.API.Console.Service.CreateUser(ctx, console.CreateUser{
 			FullName: "User",
 			Email:    "u@mail.test",
-			Password: "123a123",
+			Password: "password",
 		}, regToken.Secret)
 		require.NoError(t, err)
 
@@ -124,7 +124,7 @@ func TestOIDC(t *testing.T) {
 		user, err = sat.API.Console.Service.ActivateAccount(ctx, activationToken)
 		require.NoError(t, err)
 
-		tokenInfo, err := sat.API.Console.Service.GenerateSessionToken(ctx, user.ID, user.Email, "", "")
+		tokenInfo, err := sat.API.Console.Service.GenerateSessionToken(ctx, user.ID, user.Email, "", "", nil)
 		require.NoError(t, err)
 
 		// Set up a test project and bucket

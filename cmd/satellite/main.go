@@ -21,17 +21,17 @@ import (
 	"github.com/zeebo/errs"
 	"go.uber.org/zap"
 
+	"storj.io/common/cfgstruct"
 	"storj.io/common/fpath"
 	"storj.io/common/lrucache"
 	"storj.io/common/pb"
 	"storj.io/common/peertls/tlsopts"
+	"storj.io/common/process"
+	_ "storj.io/common/process/googleprofiler" // This attaches google cloud profiler.
 	"storj.io/common/rpc"
 	"storj.io/common/storj"
 	"storj.io/common/sync2"
-	"storj.io/private/cfgstruct"
-	"storj.io/private/process"
-	_ "storj.io/private/process/googleprofiler" // This attaches google cloud profiler.
-	"storj.io/private/version"
+	"storj.io/common/version"
 	"storj.io/storj/cmd/satellite/reports"
 	"storj.io/storj/private/revocation"
 	_ "storj.io/storj/private/version" // This attaches version information during release builds.
@@ -227,7 +227,8 @@ var (
 		RunE:  cmdCreateCustomerBalanceInvoiceItems,
 	}
 
-	aggregate = false
+	aggregate           = false
+	includeEmissionInfo = false
 
 	prepareCustomerInvoiceRecordsCmd = &cobra.Command{
 		Use:   "prepare-invoice-records [period]",
@@ -378,7 +379,7 @@ var (
 		Database  string `help:"satellite database connection string" releaseDefault:"postgres://" devDefault:"postgres://"`
 		Output    string `help:"destination of report output" default:""`
 		Completed bool   `help:"whether to output (initiated and completed) or (initiated and not completed)" default:"false"`
-		TimeBased bool   `help:"whether the satellite is using time-based graceful exit (and thus, whether to include piece transfer progress in output)" default:"false"`
+		TimeBased bool   `help:"whether the satellite is using time-based graceful exit (and thus, whether to include piece transfer progress in output)" default:"true" hidden:"true"`
 	}
 	reportsVerifyGracefulExitReceiptCfg struct {
 	}
@@ -436,8 +437,10 @@ func init() {
 	billingCmd.AddCommand(createCustomerProjectInvoiceItemsCmd)
 	billingCmd.AddCommand(createCustomerAggregatedProjectInvoiceItemsCmd)
 	billingCmd.AddCommand(createCustomerInvoicesCmd)
+	createCustomerInvoicesCmd.Flags().BoolVar(&includeEmissionInfo, "emission", false, "Used to enable CO2 emission impact calculation to be added to invoice footer.")
 	billingCmd.AddCommand(generateCustomerInvoicesCmd)
 	generateCustomerInvoicesCmd.Flags().BoolVar(&aggregate, "aggregate", false, "Used to enable invoice items aggregation in case users have many projects (more than 83).")
+	generateCustomerInvoicesCmd.Flags().BoolVar(&includeEmissionInfo, "emission", false, "Used to enable CO2 emission impact calculation to be added to invoice footer.")
 	billingCmd.AddCommand(finalizeCustomerInvoicesCmd)
 	billingCmd.AddCommand(payInvoicesWithTokenCmd)
 	billingCmd.AddCommand(payAllInvoicesCmd)
@@ -691,7 +694,7 @@ func cmdReportsGracefulExit(cmd *cobra.Command, args []string) (err error) {
 
 	// send output to stdout
 	if reportsGracefulExitCfg.Output == "" {
-		return generateGracefulExitCSV(ctx, reportsGracefulExitCfg.TimeBased, reportsGracefulExitCfg.Completed, start, end, os.Stdout)
+		return generateGracefulExitCSV(ctx, reportsGracefulExitCfg.Completed, start, end, os.Stdout)
 	}
 
 	// send output to file
@@ -704,7 +707,7 @@ func cmdReportsGracefulExit(cmd *cobra.Command, args []string) (err error) {
 		err = errs.Combine(err, file.Close())
 	}()
 
-	return generateGracefulExitCSV(ctx, reportsGracefulExitCfg.TimeBased, reportsGracefulExitCfg.Completed, start, end, file)
+	return generateGracefulExitCSV(ctx, reportsGracefulExitCfg.Completed, start, end, file)
 }
 
 func cmdNodeUsage(cmd *cobra.Command, args []string) (err error) {
@@ -894,7 +897,7 @@ func cmdCreateCustomerInvoices(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
-		return payments.CreateInvoices(ctx, periodStart)
+		return payments.CreateInvoices(ctx, periodStart, includeEmissionInfo)
 	})
 }
 
@@ -907,7 +910,7 @@ func cmdGenerateCustomerInvoices(cmd *cobra.Command, args []string) (err error) 
 	}
 
 	return runBillingCmd(ctx, func(ctx context.Context, payments *stripe.Service, _ satellite.DB) error {
-		return payments.GenerateInvoices(ctx, periodStart, aggregate)
+		return payments.GenerateInvoices(ctx, periodStart, aggregate, includeEmissionInfo)
 	})
 }
 
@@ -969,20 +972,7 @@ func cmdStripeCustomer(cmd *cobra.Command, args []string) (err error) {
 }
 
 func cmdConsistencyGECleanup(cmd *cobra.Command, args []string) error {
-	ctx, _ := process.Ctx(cmd)
-
-	if runCfg.GracefulExit.TimeBased {
-		return errs.New("this command is not supported with time-based graceful exit")
-	}
-	before, err := time.Parse("2006-01-02", consistencyGECleanupCfg.Before)
-	if err != nil {
-		return errs.New("before flag value isn't of the expected format. %+v", err)
-	}
-
-	if before.After(time.Now()) {
-		return errs.New("before flag value cannot be newer than the current time.")
-	}
-	return cleanupGEOrphanedData(ctx, before.UTC(), runCfg.GracefulExit)
+	return errs.New("this command is not supported with time-based graceful exit")
 }
 
 func cmdRestoreTrash(cmd *cobra.Command, args []string) error {
@@ -1146,5 +1136,8 @@ func cmdFixLastNets(cmd *cobra.Command, _ []string) (err error) {
 }
 
 func main() {
+	logger, _, _ := process.NewLogger("satellite")
+	zap.ReplaceGlobals(logger)
+
 	process.ExecCustomDebug(rootCmd)
 }
